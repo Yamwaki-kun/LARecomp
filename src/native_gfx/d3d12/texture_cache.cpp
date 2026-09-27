@@ -894,16 +894,21 @@ ID3D12Resource* TextureCache::Resolve(D3D12Context& context, ID3D12GraphicsComma
       // option: the levels are laid out side by side inside the tile, so the
       // source rows are wider than the destination.
       const uint32_t src_pitch = p.src_extent_x_blocks * fi.bytes_per_block;
-      std::vector<uint8_t> tile(size_t(src_pitch) * p.src_extent_y_blocks);
+      static thread_local std::vector<uint8_t> tile_scratch;
+      const size_t tile_bytes = size_t(src_pitch) * p.src_extent_y_blocks;
+      if (tile_scratch.size() < tile_bytes) {
+        tile_scratch.resize(tile_bytes);
+      }
+      uint8_t* tile_ptr = tile_scratch.data();
       if (fetch.tiled) {
-        if (!UntileSurface2D(tile.data(), src_pitch, src, p.guest_size, p.src_extent_x_blocks,
+        if (!UntileSurface2D(tile_ptr, src_pitch, src, p.guest_size, p.src_extent_x_blocks,
                              p.src_extent_y_blocks, fi.bytes_per_block)) {
           ++stats_.decode_failures;
         }
       } else {
         const uint32_t row_bytes = p.src_extent_x_blocks * fi.bytes_per_block;
         for (uint32_t y = 0; y < p.src_extent_y_blocks; ++y) {
-          std::memcpy(tile.data() + size_t(y) * src_pitch, src + size_t(y) * p.guest_pitch,
+          std::memcpy(tile_ptr + size_t(y) * src_pitch, src + size_t(y) * p.guest_pitch,
                       row_bytes);
         }
       }
@@ -913,7 +918,7 @@ ID3D12Resource* TextureCache::Resolve(D3D12Context& context, ID3D12GraphicsComma
         if (sy >= p.src_extent_y_blocks) break;
         const size_t sx = size_t(p.off_x_blocks) * fi.bytes_per_block;
         if (sx + row_bytes > src_pitch) break;
-        std::memcpy(dst + size_t(y) * p.upload_pitch, tile.data() + sy * src_pitch + sx, row_bytes);
+        std::memcpy(dst + size_t(y) * p.upload_pitch, tile_ptr + sy * src_pitch + sx, row_bytes);
       }
     } else if (fetch.tiled) {
       // Tiled surfaces are padded to 32x32-block macro tiles; pass the real

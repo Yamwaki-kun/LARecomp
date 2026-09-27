@@ -596,11 +596,20 @@ bool BufferCache::Resolve(D3D12Context& context, ID3D12GraphicsCommandList* cl,
             region->clean_streak = 0;
             region->dirty_streak = 0;
             WatchRegion(*region);
-            // Same window as in UploadRegion: the blocks were hashed BEFORE
-            // the watch went back on, so a write in between leaves the region
-            // clean and stale. With the watch now armed, send it once more --
-            // any write after this point faults and dirties it again.
+            // Re-check if any write happened between the earlier hash check and arming the watch.
+            // If the sampled blocks still match, the GPU's copy is valid and the watch is active.
+            bool changed = false;
             if (REXCVAR_GET(mcla_native_gfx_watch_before_copy)) {
+              for (uint32_t b = first; b <= last; ++b) {
+                const uint32_t off = b * kVerifyBlock;
+                const uint32_t len = std::min(kVerifyBlock, region->size - off);
+                if (HashBlockSampled(p + off, len) != region->block_hash[b]) {
+                  changed = true;
+                  break;
+                }
+              }
+            }
+            if (changed) {
               region->dirty = true;
               region->whole_dirty = true;
               ++stats_.demotion_resends;
