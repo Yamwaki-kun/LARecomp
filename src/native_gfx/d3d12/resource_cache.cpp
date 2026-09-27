@@ -149,7 +149,7 @@ Microsoft::WRL::ComPtr<ID3D12Resource> BufferCache::AcquireBuffer(D3D12Context& 
     }
   }
 
-  if (best_idx >= 0 && best_cap <= std::max(size * 2u, 65536u)) {
+  if (best_idx >= 0 && best_cap <= std::max(size * 4u, 262144u)) {
     ++stats_.pool_hits;
     auto res = std::move(available_buffers_[best_idx].resource);
     available_buffers_.erase(available_buffers_.begin() + best_idx);
@@ -180,8 +180,10 @@ Microsoft::WRL::ComPtr<ID3D12Resource> BufferCache::AcquireBuffer(D3D12Context& 
 
 void BufferCache::RetireBuffer(D3D12Context& context, Microsoft::WRL::ComPtr<ID3D12Resource> resource, uint32_t size) {
   if (!resource) return;
-  // If pool already has a lot of idle buffers (e.g. >= 128), release to context
-  if (available_buffers_.size() + retired_buffers_.size() >= 128) {
+  // Keep up to 2048 idle buffers in the pool (~64-128 MB VRAM max)
+  // to prevent driver allocation locks (NtGdiDdDDICreateAllocation/DestroyAllocation)
+  // during sector streaming.
+  if (available_buffers_.size() + retired_buffers_.size() >= 2048) {
     context.DeferRelease(resource.Detach());
     return;
   }
@@ -600,7 +602,8 @@ bool BufferCache::Resolve(D3D12Context& context, ID3D12GraphicsCommandList* cl,
             // If the sampled blocks still match, the GPU's copy is valid and the watch is active.
             bool changed = false;
             if (REXCVAR_GET(mcla_native_gfx_watch_before_copy)) {
-              for (uint32_t b = first; b <= last; ++b) {
+              const uint32_t total_blocks = uint32_t(region->block_hash.size());
+              for (uint32_t b = 0; b < total_blocks; ++b) {
                 const uint32_t off = b * kVerifyBlock;
                 const uint32_t len = std::min(kVerifyBlock, region->size - off);
                 if (HashBlockSampled(p + off, len) != region->block_hash[b]) {

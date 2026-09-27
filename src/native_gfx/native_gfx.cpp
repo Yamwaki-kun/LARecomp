@@ -503,7 +503,7 @@ REXCVAR_DEFINE_BOOL(mcla_native_gfx_region_memo, true, "MCLA/NativeGfx",
                     "for A/B.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
-REXCVAR_DEFINE_BOOL(mcla_native_gfx_submit_thread, true, "MCLA/NativeGfx",
+REXCVAR_DEFINE_BOOL(mcla_native_gfx_submit_thread, false, "MCLA/NativeGfx",
                     "Hand each recorded submission to a dedicated thread that replays it onto "
                     "the D3D12 command list and submits it, so the driver calls, Close and "
                     "ExecuteCommandLists leave the guest's render thread. Implies "
