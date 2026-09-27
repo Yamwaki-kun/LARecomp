@@ -901,6 +901,10 @@ ID3D12Resource* TextureCache::Resolve(D3D12Context& context, ID3D12GraphicsComma
       }
       uint8_t* tile_ptr = tile_scratch.data();
       if (fetch.tiled) {
+        // A short source makes the untile skip the blocks it cannot read. The
+        // scratch outlives this texture, so those blocks would carry the last
+        // tile's bytes instead of the zeros a fresh buffer had.
+        std::memset(tile_ptr, 0, tile_bytes);
         if (!UntileSurface2D(tile_ptr, src_pitch, src, p.guest_size, p.src_extent_x_blocks,
                              p.src_extent_y_blocks, fi.bytes_per_block)) {
           ++stats_.decode_failures;

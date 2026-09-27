@@ -264,6 +264,9 @@ namespace {
 // ~12 MB a frame (wall ~55 ms -> ~110 ms), which trades one bug for another.
 // Both sides -- the upload and the check -- must sample identically.
 uint64_t HashBlockSampled(const uint8_t* p, uint32_t len) {
+  // Eight 64-byte slices spread evenly, i.e. one in every 512 bytes of the
+  // block. Three (head/middle/tail) was cheaper and let a real case through --
+  // MESHSTALE still reported one region whose changed bytes missed all three.
   constexpr uint32_t kSlice = 64;
   constexpr uint32_t kSlices = 8;
   uint64_t h = uint64_t(len) * 1099511628211ull;
@@ -595,8 +598,8 @@ bool BufferCache::Resolve(D3D12Context& context, ID3D12GraphicsCommandList* cl,
       // streaming any more: put it back under the watch, which costs one
       // VirtualProtect instead of a hash per frame. Only frames where blocks
       // were really re-hashed count, so a second draw binding the same blocks
-      // cannot inflate the streak. Set demote_frames to 0 to permanently keep
-      // streaming regions in fast sampled verification mode without VirtualProtect churn.
+      // cannot inflate the streak. With the sticky classifier, a demote_frames
+      // of 0 keeps a streaming region off the watch for good.
       if (region->streaming && checked_any) {
         if (region->dirty) {
           region->clean_streak = 0;
@@ -611,21 +614,17 @@ bool BufferCache::Resolve(D3D12Context& context, ID3D12GraphicsCommandList* cl,
             region->clean_streak = 0;
             region->dirty_streak = 0;
             WatchRegion(*region);
-            // Re-check if any write happened between the earlier hash check and arming the watch.
-            // If the sampled blocks still match, the GPU's copy is valid and the watch is active.
-            bool changed = false;
+            // Same window as in UploadRegion: the blocks were hashed BEFORE
+            // the watch went back on, so a write in between leaves the region
+            // clean and stale. With the watch now armed, send it once more --
+            // any write after this point faults and dirties it again.
+            //
+            // Re-hashing instead of re-sending does not close it. While the
+            // region streamed, only the sampled hash watched it, and a write
+            // that missed every slice is still there: the re-send is what
+            // flushes it. Measured when this went in: hash catches on watched
+            // regions went from ~1210 to ~615 per 600 frames.
             if (REXCVAR_GET(mcla_native_gfx_watch_before_copy)) {
-              const uint32_t total_blocks = uint32_t(region->block_hash.size());
-              for (uint32_t b = 0; b < total_blocks; ++b) {
-                const uint32_t off = b * kVerifyBlock;
-                const uint32_t len = std::min(kVerifyBlock, region->size - off);
-                if (HashBlockSampled(p + off, len) != region->block_hash[b]) {
-                  changed = true;
-                  break;
-                }
-              }
-            }
-            if (changed) {
               region->dirty = true;
               region->whole_dirty = true;
               ++stats_.demotion_resends;
