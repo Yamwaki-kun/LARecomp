@@ -98,17 +98,20 @@ REXCVAR_DEFINE_BOOL(model_mods_submeshes, true, "MCLA/Mods",
     "one submesh, which is the conservative path if a model renders oddly.")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
-REXCVAR_DEFINE_BOOL(model_mods_decimate, true, "MCLA/Mods",
+REXCVAR_DEFINE_BOOL(model_mods_decimate, false, "MCLA/Mods",
     "Whether a replacement mesh larger than the slot it has to live in may be "
-    "welded down to fit. The slot is fixed -- the drawable's largest submesh, "
-    "around 2300 vertices, and a few hundred on the low LOD -- and the welding "
-    "is a blunt instrument: vertices that share a cell of a spatial grid are "
-    "merged and averaged, which on a detailed model rounds off faces and hands. "
-    "Turn this off if you would rather decimate the model yourself in a "
-    "modelling tool, where you can see what you are giving up; anything still "
-    "too big is then refused and that variant keeps the shipped character. "
+    "welded down to fit: a character, a rim, or a part replaced on a shipped "
+    "car. A car built on a donor is always welded to its ceilings "
+    "(model_mods_car_budget for the body) and ignores this. The slot is fixed "
+    "-- for a character, the drawable's largest submesh, around 2300 vertices, "
+    "and a few hundred on the low LOD -- and the welding is a blunt instrument: "
+    "vertices that share a cell of a spatial grid are merged and averaged, "
+    "which on a detailed model rounds off faces and hands. Off, a mesh still "
+    "too big is refused with the reason in the log and that variant keeps the "
+    "shipped model, so what a mod shows is what it brought; decimate it "
+    "yourself in a modelling tool, where you can see what you are giving up. "
     "Expect the low LOD to be refused first, so the original driver reappears "
-    "at a distance.")
+    "at a distance. On welds it in instead.")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 REXCVAR_DEFINE_DOUBLE(model_mods_proportions, 0.0, "MCLA/Mods",
@@ -342,21 +345,27 @@ REXCVAR_DEFINE_BOOL(model_mods_grow, false, "MCLA/Mods",
     "go back to welding everything into the shipped buffers.")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
-REXCVAR_DEFINE_UINT32(model_mods_car_budget, 1048576, "MCLA/Mods",
-    "The largest a replaced car body may be grown to, in bytes per LOD. "
-    "Anything the mod brings beyond what fits is welded away.\n"
+REXCVAR_DEFINE_UINT32(model_mods_car_budget, 16777216, "MCLA/Mods",
+    "The largest a replaced car body may be grown to, in bytes for LOD 0; the "
+    "lower LODs get a quarter of it. Anything the mod brings beyond what fits "
+    "is welded away, whatever model_mods_decimate says. It is a ceiling, not a "
+    "size: a body that needs less is grown only to what it needs.\n"
     "\n"
     "Growing a drawable has no natural limit -- the mod hands over whatever it "
     "modelled and the resource follows -- but the game has one in practice. "
     "Counted over the 8849 vehicle drawables the game ships, the largest "
     "declares 1,163,264 bytes and the median 45,056; counted over body_lod_0 "
-    "alone the largest is 884,736 and the median 266,240. The default sits just "
-    "under that largest, so a mod may be as heavy as the heaviest thing the "
-    "engine already streams and no heavier.\n"
+    "alone the largest is 884,736 and the median 266,240. The default used to "
+    "sit just under that largest, so a mod could be as heavy as the heaviest "
+    "thing the engine already streams and no heavier.\n"
     "\n"
-    "Measured, and not a verdict: a 4,194,304 budget gave the BMW a 3,825,664 "
-    "byte body_lod_0 that drives correctly, so exceeding the shipped maximum is "
-    "not by itself what breaks a car.\n"
+    "It cannot any more. Each large buffer now starts on a block boundary and "
+    "the padding counts against the ceiling; the shader passes are dealt their "
+    "share in order, so by the last ones the padding has eaten the room: at "
+    "4,194,304 the BMW came back with Chrome at 4 of 7353 triangles, CarLight "
+    "at 124 of 2660 and CarGlass at 112 of 830. At 16,777,216 every pass "
+    "arrives whole, a 7,340,032-byte body_lod_0, and the car drives "
+    "correctly.\n"
     "\n"
     "0 lifts the ceiling entirely, which is the setting to try when you want to "
     "know whether size is what a car is failing on.")
