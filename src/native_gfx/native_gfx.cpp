@@ -590,7 +590,7 @@ REXCVAR_DEFINE_BOOL(mcla_native_gfx_partial_reupload, true, "MCLA/NativeGfx",
                     "region. Off restores whole-region re-uploads, for A/B.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
-REXCVAR_DEFINE_UINT32(mcla_native_gfx_streaming_frames, 3, "MCLA/NativeGfx",
+REXCVAR_DEFINE_UINT32(mcla_native_gfx_streaming_frames, 1, "MCLA/NativeGfx",
                       "Consecutive frames of being written to after which a geometry region "
                       "comes off the page write watch, or 0 to keep every region watched. The "
                       "watch costs an access violation per guest write, taken through the memory "
@@ -599,30 +599,24 @@ REXCVAR_DEFINE_UINT32(mcla_native_gfx_streaming_frames, 3, "MCLA/NativeGfx",
                       "frame, about 9% of the render thread, to report writes the next frame "
                       "was going to re-upload anyway. An unwatched region is checked by the "
                       "sampled block hash instead, once a frame over the blocks a draw reads, "
-                      "so unchanged bytes still cost no upload; four unchanged frames put it "
-                      "back under the watch.")
+                      "so unchanged bytes still cost no upload.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
-REXCVAR_DEFINE_BOOL(mcla_native_gfx_streaming_sticky, false, "MCLA/NativeGfx",
+REXCVAR_DEFINE_BOOL(mcla_native_gfx_streaming_sticky, true, "MCLA/NativeGfx",
                     "Hysteresis for the streaming classifier above. Promotion counts a region "
                     "written every other frame as a streak (a double-buffered dynamic buffer "
                     "never had two consecutive dirty frames, so it stayed watched and paid a "
                     "fault, a VirtualProtect and a re-upload on every write), and demotion "
                     "waits mcla_native_gfx_streaming_demote_frames clean frames instead of four. "
-                    "Measured while driving before this existed: ~25 promotions and ~24 "
-                    "demotions a frame, each demotion re-arming the watch and re-sending the "
-                    "whole region, and ~690 watch faults a frame. Measured on: promotions and "
-                    "demotions -85%, re-uploads and watch faults -29%, but no frame time gain "
-                    "above noise -- and with it on for a whole session stale meshes showed up "
-                    "(stretched triangles across the screen, HUD pieces missing): more regions "
-                    "off the watch means more rewrites left to the sampled hash, which misses "
-                    "them. Keep it off.")
+                    "Defaults to true to prevent demotion ping-pong and eliminate VirtualProtect/TLB "
+                    "shootdowns.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
-REXCVAR_DEFINE_UINT32(mcla_native_gfx_streaming_demote_frames, 30, "MCLA/NativeGfx",
+REXCVAR_DEFINE_UINT32(mcla_native_gfx_streaming_demote_frames, 0, "MCLA/NativeGfx",
                       "With mcla_native_gfx_streaming_sticky on: clean frames (frames in which "
                       "the region was drawn and its hashed blocks matched) before a streaming "
-                      "region goes back under the write watch.")
+                      "region goes back under the write watch. Set to 0 to permanently keep "
+                      "streaming regions off the write watch and eliminate VirtualProtect storms.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_BOOL(mcla_native_gfx_state_cache, true, "MCLA/NativeGfx",

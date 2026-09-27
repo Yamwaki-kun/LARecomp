@@ -297,7 +297,7 @@ class BufferCache {
     uint32_t size = 0;
     Region* region = nullptr;
   };
-  static constexpr uint32_t kLookupMemoSize = 1024;  // power of two
+  static constexpr uint32_t kLookupMemoSize = 4096;  // power of two
   LookupMemo lookup_memo_[2][kLookupMemoSize] = {};
   uint64_t region_generation_ = 1;
 

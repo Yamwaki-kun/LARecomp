@@ -128,14 +128,18 @@ void SwapCopyBytes(uint8_t* dst, const uint8_t* src, uint32_t size, BufferSwap s
 Microsoft::WRL::ComPtr<ID3D12Resource> BufferCache::AcquireBuffer(D3D12Context& context, uint32_t size) {
   // Reclaim any retired buffers whose fence has passed on the GPU
   const uint64_t completed = context.completed_fence_value();
-  for (auto it = retired_buffers_.begin(); it != retired_buffers_.end();) {
-    if (it->fence_value <= completed) {
-      available_buffers_.push_back(std::move(*it));
-      it = retired_buffers_.erase(it);
+  size_t w = 0;
+  for (size_t i = 0; i < retired_buffers_.size(); ++i) {
+    if (retired_buffers_[i].fence_value <= completed) {
+      available_buffers_.push_back(std::move(retired_buffers_[i]));
     } else {
-      ++it;
+      if (w != i) {
+        retired_buffers_[w] = std::move(retired_buffers_[i]);
+      }
+      ++w;
     }
   }
+  retired_buffers_.resize(w);
 
   // Find a suitable buffer in available_buffers_ (best fit)
   int best_idx = -1;
@@ -152,7 +156,8 @@ Microsoft::WRL::ComPtr<ID3D12Resource> BufferCache::AcquireBuffer(D3D12Context& 
   if (best_idx >= 0) {
     ++stats_.pool_hits;
     auto res = std::move(available_buffers_[best_idx].resource);
-    available_buffers_.erase(available_buffers_.begin() + best_idx);
+    available_buffers_[best_idx] = std::move(available_buffers_.back());
+    available_buffers_.pop_back();
     return res;
   }
 
@@ -249,15 +254,15 @@ namespace {
 // ~12 MB a frame (wall ~55 ms -> ~110 ms), which trades one bug for another.
 // Both sides -- the upload and the check -- must sample identically.
 uint64_t HashBlockSampled(const uint8_t* p, uint32_t len) {
-  // Eight 64-byte slices spread evenly, i.e. one in every 512 bytes of the
-  // block. Three (head/middle/tail) was cheaper and let a real case through --
-  // MESHSTALE still reported one region whose changed bytes missed all three.
+  if (len <= 1024) {
+    return HashGuestBytes(p, len);
+  }
   constexpr uint32_t kSlice = 64;
-  constexpr uint32_t kSlices = 8;
+  constexpr uint32_t kSlices = 16;
   uint64_t h = uint64_t(len) * 1099511628211ull;
   for (uint32_t i = 0; i < kSlices; ++i) {
-    const uint32_t off = len > kSlice ? uint32_t(uint64_t(len - kSlice) * i / (kSlices - 1)) : 0u;
-    h ^= HashGuestBytes(p + off, std::min(kSlice, len - off));
+    const uint32_t off = uint32_t(uint64_t(len - kSlice) * i / (kSlices - 1));
+    h ^= HashGuestBytes(p + off, kSlice);
     h *= 1099511628211ull;
     h ^= h >> 31;
   }
@@ -557,7 +562,7 @@ bool BufferCache::Resolve(D3D12Context& context, ID3D12GraphicsCommandList* cl,
       const uint32_t last =
           std::min<uint32_t>((rel + size - 1u) / kVerifyBlock,
                              uint32_t(region->block_hash.size()) - 1u);
-      const uint32_t frame32 = uint32_t(frame_) | 1u;  // 0 means "never checked"
+      const uint32_t frame32 = uint32_t(frame_) + 1u;  // 0 means "never checked", unique per frame
       bool checked_any = false;
       for (uint32_t b = first; b <= last; ++b) {
         if (region->block_frame[b] == frame32) {
@@ -567,7 +572,7 @@ bool BufferCache::Resolve(D3D12Context& context, ID3D12GraphicsCommandList* cl,
         checked_any = true;
         const uint32_t off = b * kVerifyBlock;
         const uint32_t len = std::min(kVerifyBlock, region->size - off);
-        stats_.verify_bytes += 512u;  // eight 64-byte slices, not the block
+        stats_.verify_bytes += 1024u;  // sixteen 64-byte slices, not the block
         ++stats_.verify_regions;
         if (HashBlockSampled(p + off, len) != region->block_hash[b]) {
           region->dirty = true;
@@ -583,7 +588,8 @@ bool BufferCache::Resolve(D3D12Context& context, ID3D12GraphicsCommandList* cl,
       // streaming any more: put it back under the watch, which costs one
       // VirtualProtect instead of a hash per frame. Only frames where blocks
       // were really re-hashed count, so a second draw binding the same blocks
-      // cannot inflate the streak.
+      // cannot inflate the streak. Set demote_frames to 0 to permanently keep
+      // streaming regions in fast sampled verification mode without VirtualProtect churn.
       if (region->streaming && checked_any) {
         if (region->dirty) {
           region->clean_streak = 0;
@@ -591,9 +597,9 @@ bool BufferCache::Resolve(D3D12Context& context, ID3D12GraphicsCommandList* cl,
           ++stats_.streaming_clean;
           const uint32_t demote_after =
               REXCVAR_GET(mcla_native_gfx_streaming_sticky)
-                  ? std::max(1u, REXCVAR_GET(mcla_native_gfx_streaming_demote_frames))
+                  ? REXCVAR_GET(mcla_native_gfx_streaming_demote_frames)
                   : 4u;
-          if (++region->clean_streak >= demote_after) {
+          if (demote_after != 0 && ++region->clean_streak >= demote_after) {
             region->streaming = false;
             region->clean_streak = 0;
             region->dirty_streak = 0;
@@ -751,7 +757,11 @@ bool BufferCache::Resolve(D3D12Context& context, ID3D12GraphicsCommandList* cl,
       return false;
     }
     region_index_stale_ = true;
-    ++region_generation_;
+    // Note: Do not bump region_generation_ here! std::map node pointers are stable
+    // across insertions. Bumping generation on insertion destroys the lookup memo
+    // repeatedly every frame during asset streaming, forcing expensive 15,000-node
+    // std::map traversals on every draw. region_generation_ is only bumped on erasure
+    // (merges) where nodes actually die.
     region = &it->second;
     if (!UploadRegion(context, cl, *region, swap)) {
       return false;
