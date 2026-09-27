@@ -799,7 +799,7 @@ REXCVAR_DEFINE_BOOL(mcla_native_gfx_swapped_texcoords, true, "MCLA/NativeGfx",
                     "default; the switch exists to take it back out while bisecting.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
-REXCVAR_DEFINE_UINT32(mcla_native_gfx_texcache_mb, 768, "MCLA/NativeGfx",
+REXCVAR_DEFINE_UINT32(mcla_native_gfx_texcache_mb, 2048, "MCLA/NativeGfx",
                       "Byte budget (MiB) for the native texture cache. The cache is keyed by the "
                       "fetch constant, so a streaming game keeps producing new keys as it pages "
                       "geometry and textures in and out; without a budget every one of them stays "

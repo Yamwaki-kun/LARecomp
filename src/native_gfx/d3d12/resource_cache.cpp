@@ -149,7 +149,7 @@ Microsoft::WRL::ComPtr<ID3D12Resource> BufferCache::AcquireBuffer(D3D12Context& 
     }
   }
 
-  if (best_idx >= 0 && best_cap <= std::max(size * 4u, 262144u)) {
+  if (best_idx >= 0) {
     ++stats_.pool_hits;
     auto res = std::move(available_buffers_[best_idx].resource);
     available_buffers_.erase(available_buffers_.begin() + best_idx);
@@ -180,10 +180,10 @@ Microsoft::WRL::ComPtr<ID3D12Resource> BufferCache::AcquireBuffer(D3D12Context& 
 
 void BufferCache::RetireBuffer(D3D12Context& context, Microsoft::WRL::ComPtr<ID3D12Resource> resource, uint32_t size) {
   if (!resource) return;
-  // Keep up to 2048 idle buffers in the pool (~64-128 MB VRAM max)
-  // to prevent driver allocation locks (NtGdiDdDDICreateAllocation/DestroyAllocation)
+  // Keep up to 8192 idle buffers in the pool (~256-512 MB VRAM max)
+  // to completely eliminate driver allocation locks (NtGdiDdDDICreateAllocation/DestroyAllocation)
   // during sector streaming.
-  if (available_buffers_.size() + retired_buffers_.size() >= 2048) {
+  if (available_buffers_.size() + retired_buffers_.size() >= 8192) {
     context.DeferRelease(resource.Detach());
     return;
   }
