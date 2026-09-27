@@ -125,7 +125,8 @@ void SwapCopyBytes(uint8_t* dst, const uint8_t* src, uint32_t size, BufferSwap s
   SwapCopy(dst, src, size, swap);
 }
 
-Microsoft::WRL::ComPtr<ID3D12Resource> BufferCache::AcquireBuffer(D3D12Context& context, uint32_t size) {
+Microsoft::WRL::ComPtr<ID3D12Resource> BufferCache::AcquireBuffer(D3D12Context& context, uint32_t size,
+                                                                 D3D12_RESOURCE_STATES* out_state) {
   // Reclaim any retired buffers whose fence has passed on the GPU
   const uint64_t completed = context.completed_fence_value();
   size_t w = 0;
@@ -155,6 +156,9 @@ Microsoft::WRL::ComPtr<ID3D12Resource> BufferCache::AcquireBuffer(D3D12Context& 
 
   if (best_idx >= 0) {
     ++stats_.pool_hits;
+    if (out_state) {
+      *out_state = available_buffers_[best_idx].state;
+    }
     auto res = std::move(available_buffers_[best_idx].resource);
     available_buffers_[best_idx] = std::move(available_buffers_.back());
     available_buffers_.pop_back();
@@ -178,12 +182,16 @@ Microsoft::WRL::ComPtr<ID3D12Resource> BufferCache::AcquireBuffer(D3D12Context& 
           &rex::ui::d3d12::util::kHeapPropertiesDefault, D3D12_HEAP_FLAG_NONE, &desc,
           D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&res)))) {
     ++stats_.pool_allocations;
+    if (out_state) {
+      *out_state = D3D12_RESOURCE_STATE_COPY_DEST;
+    }
     return res;
   }
   return nullptr;
 }
 
-void BufferCache::RetireBuffer(D3D12Context& context, Microsoft::WRL::ComPtr<ID3D12Resource> resource, uint32_t size) {
+void BufferCache::RetireBuffer(D3D12Context& context, Microsoft::WRL::ComPtr<ID3D12Resource> resource,
+                               uint32_t size, D3D12_RESOURCE_STATES state) {
   if (!resource) return;
   // Keep up to 8192 idle buffers in the pool (~256-512 MB VRAM max)
   // to completely eliminate driver allocation locks (NtGdiDdDDICreateAllocation/DestroyAllocation)
@@ -192,7 +200,9 @@ void BufferCache::RetireBuffer(D3D12Context& context, Microsoft::WRL::ComPtr<ID3
     context.DeferRelease(resource.Detach());
     return;
   }
-  retired_buffers_.push_back({std::move(resource), size, context.current_fence_value()});
+  // Must tag with current_fence_value() + 1 because the current command list
+  // referencing this buffer has not been submitted yet!
+  retired_buffers_.push_back({std::move(resource), size, context.current_fence_value() + 1, state});
 }
 
 void BufferCache::Shutdown(D3D12Context& context) {
@@ -254,15 +264,12 @@ namespace {
 // ~12 MB a frame (wall ~55 ms -> ~110 ms), which trades one bug for another.
 // Both sides -- the upload and the check -- must sample identically.
 uint64_t HashBlockSampled(const uint8_t* p, uint32_t len) {
-  if (len <= 1024) {
-    return HashGuestBytes(p, len);
-  }
   constexpr uint32_t kSlice = 64;
-  constexpr uint32_t kSlices = 16;
+  constexpr uint32_t kSlices = 8;
   uint64_t h = uint64_t(len) * 1099511628211ull;
   for (uint32_t i = 0; i < kSlices; ++i) {
-    const uint32_t off = uint32_t(uint64_t(len - kSlice) * i / (kSlices - 1));
-    h ^= HashGuestBytes(p + off, kSlice);
+    const uint32_t off = len > kSlice ? uint32_t(uint64_t(len - kSlice) * i / (kSlices - 1)) : 0u;
+    h ^= HashGuestBytes(p + off, std::min(kSlice, len - off));
     h *= 1099511628211ull;
     h ^= h >> 31;
   }
@@ -572,7 +579,7 @@ bool BufferCache::Resolve(D3D12Context& context, ID3D12GraphicsCommandList* cl,
         checked_any = true;
         const uint32_t off = b * kVerifyBlock;
         const uint32_t len = std::min(kVerifyBlock, region->size - off);
-        stats_.verify_bytes += 1024u;  // sixteen 64-byte slices, not the block
+        stats_.verify_bytes += 512u;  // eight 64-byte slices, not the block
         ++stats_.verify_regions;
         if (HashBlockSampled(p + off, len) != region->block_hash[b]) {
           region->dirty = true;
@@ -691,7 +698,7 @@ bool BufferCache::Resolve(D3D12Context& context, ID3D12GraphicsCommandList* cl,
       auto it = map.find(base);
       if (it != map.end()) {
         if (it->second.resource) {
-          RetireBuffer(context, std::move(it->second.resource), it->second.size);
+          RetireBuffer(context, std::move(it->second.resource), it->second.size, it->second.state);
         }
         map.erase(it);
         region_index_stale_ = true;
@@ -721,7 +728,7 @@ bool BufferCache::Resolve(D3D12Context& context, ID3D12GraphicsCommandList* cl,
       const uint32_t r_hi = r_lo + it->second.size;
       if (r_lo >= lo && r_hi <= hi) {
         if (it->second.resource) {
-          RetireBuffer(context, std::move(it->second.resource), it->second.size);
+          RetireBuffer(context, std::move(it->second.resource), it->second.size, it->second.state);
         }
         it = map.erase(it);
         region_index_stale_ = true;
@@ -735,7 +742,8 @@ bool BufferCache::Resolve(D3D12Context& context, ID3D12GraphicsCommandList* cl,
     Region fresh;
     fresh.base = lo;
     fresh.size = hi - lo;
-    fresh.resource = AcquireBuffer(context, fresh.size);
+    D3D12_RESOURCE_STATES initial_state = D3D12_RESOURCE_STATE_COPY_DEST;
+    fresh.resource = AcquireBuffer(context, fresh.size, &initial_state);
     if (!fresh.resource) {
       REXLOG_ERROR("[native_gfx] buffer region creation failed ({:#010x}+{})", fresh.base,
                    fresh.size);
@@ -743,7 +751,7 @@ bool BufferCache::Resolve(D3D12Context& context, ID3D12GraphicsCommandList* cl,
       ++stats_.upload_failures;
       return false;
     }
-    fresh.state = D3D12_RESOURCE_STATE_COPY_DEST;
+    fresh.state = initial_state;
     map_max_len_[uint32_t(swap)] = std::max(map_max_len_[uint32_t(swap)], fresh.size);
     auto [it, inserted] = map.emplace(fresh.base, std::move(fresh));
     if (!inserted) {
@@ -757,11 +765,7 @@ bool BufferCache::Resolve(D3D12Context& context, ID3D12GraphicsCommandList* cl,
       return false;
     }
     region_index_stale_ = true;
-    // Note: Do not bump region_generation_ here! std::map node pointers are stable
-    // across insertions. Bumping generation on insertion destroys the lookup memo
-    // repeatedly every frame during asset streaming, forcing expensive 15,000-node
-    // std::map traversals on every draw. region_generation_ is only bumped on erasure
-    // (merges) where nodes actually die.
+    ++region_generation_;
     region = &it->second;
     if (!UploadRegion(context, cl, *region, swap)) {
       return false;

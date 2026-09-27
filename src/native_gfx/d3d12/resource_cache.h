@@ -368,12 +368,15 @@ class BufferCache {
     Microsoft::WRL::ComPtr<ID3D12Resource> resource;
     uint32_t capacity = 0;
     uint64_t fence_value = 0;
+    D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COPY_DEST;
   };
   std::vector<PooledBuffer> retired_buffers_;
   std::vector<PooledBuffer> available_buffers_;
 
-  Microsoft::WRL::ComPtr<ID3D12Resource> AcquireBuffer(D3D12Context& context, uint32_t size);
-  void RetireBuffer(D3D12Context& context, Microsoft::WRL::ComPtr<ID3D12Resource> resource, uint32_t size);
+  Microsoft::WRL::ComPtr<ID3D12Resource> AcquireBuffer(D3D12Context& context, uint32_t size,
+                                                       D3D12_RESOURCE_STATES* out_state = nullptr);
+  void RetireBuffer(D3D12Context& context, Microsoft::WRL::ComPtr<ID3D12Resource> resource,
+                    uint32_t size, D3D12_RESOURCE_STATES state);
 
   Stats stats_;
 };

@@ -590,7 +590,7 @@ REXCVAR_DEFINE_BOOL(mcla_native_gfx_partial_reupload, true, "MCLA/NativeGfx",
                     "region. Off restores whole-region re-uploads, for A/B.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
-REXCVAR_DEFINE_UINT32(mcla_native_gfx_streaming_frames, 1, "MCLA/NativeGfx",
+REXCVAR_DEFINE_UINT32(mcla_native_gfx_streaming_frames, 3, "MCLA/NativeGfx",
                       "Consecutive frames of being written to after which a geometry region "
                       "comes off the page write watch, or 0 to keep every region watched. The "
                       "watch costs an access violation per guest write, taken through the memory "
