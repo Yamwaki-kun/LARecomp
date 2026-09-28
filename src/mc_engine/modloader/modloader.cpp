@@ -4846,22 +4846,14 @@ void Init() {
     }
     const bool has_meshes = !mods.empty() || !rim_mods.empty() || !car_mods.empty();
 
-    // A mesh mod needs the shipped archive as its template and xcompress32.dll to
-    // read it. A raw file needs neither -- it is already the finished bytes -- so
-    // neither of those is allowed to sink a mod that only carries files.
+    // A mesh mod needs the shipped archive as its template. A raw file does not
+    // -- it is already the finished bytes -- so a missing archive is not allowed
+    // to sink a mod that only carries files.
     const std::filesystem::path source_archive = game_root / kSourceArchiveName;
     if (!std::filesystem::exists(source_archive, ec)) {
         LARECOMP_APP_ERROR("[mods] {} not found, {}", source_archive.string(),
                            has_meshes ? "model replacement disabled" : "meshes unavailable");
         if (has_meshes) return;
-    }
-
-    if (has_meshes && !XCompressAvailable(exe_dir)) {
-        LARECOMP_APP_ERROR(
-            "[mods] xcompress32.dll missing next to the executable -- it is needed to read the "
-            "original models. {} mod(s) skipped.",
-            mods.size() + rim_mods.size() + car_mods.size());
-        return;
     }
 
     Rpf3Reader archive;
