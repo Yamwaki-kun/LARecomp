@@ -688,7 +688,7 @@ bool ResolveGeometryBuffers(GeometrySnapshot& s, uint32_t element_count,
       // never invalidated again; see BufferCache::Resolve.
       BufferBinding b;
       if (!buffers->Resolve(*context, cl, stream.guest_base, stream.guest_size,
-                            SwapForEndian(stream.endian), b)) {
+                            SwapForEndian(stream.endian), b, inline_geometry != nullptr)) {
         s.failure = "vertex buffer could not be resolved";
         return false;
       }

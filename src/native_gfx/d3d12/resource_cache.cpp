@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <new>
 #include <vector>
 
 #include <rex/cvar.h>
@@ -332,11 +333,11 @@ bool BufferCache::UploadRegion(D3D12Context& context, ID3D12GraphicsCommandList*
   if (arm_first) {
     WatchRegion(region);
   }
-  // Only the blocks an exact range dirtied, when that is all that is known to
-  // have changed. Anything else -- a new region, a hash mismatch, a region
-  // whose block tables do not match its size -- is sent whole, as before.
-  const bool partial = REXCVAR_GET(mcla_native_gfx_partial_reupload) && !region.whole_dirty &&
-                       !region.streaming &&
+  // Inline data is uploaded from a stable whole-region snapshot so its copy
+  // and hash always describe the same bytes. Partial uploads are for exact
+  // write-range invalidations on ordinary cached regions only.
+  const bool partial = REXCVAR_GET(mcla_native_gfx_partial_reupload) && !region.exact_hash &&
+                       !region.whole_dirty && !region.streaming &&
                        region.block_dirty.size() == blocks &&
                        region.block_hash.size() == blocks && region.block_frame.size() == blocks;
   if (partial) {
@@ -383,8 +384,9 @@ bool BufferCache::UploadRegion(D3D12Context& context, ID3D12GraphicsCommandList*
                              len);
         for (uint32_t k = b; k < e; ++k) {
           const uint32_t koff = k * kVerifyBlock;
-          region.block_hash[k] =
-              HashBlockSampled(src + koff, std::min(kVerifyBlock, region.size - koff));
+          const uint32_t block_len = std::min(kVerifyBlock, region.size - koff);
+          region.block_hash[k] = region.exact_hash ? HashGuestBytes(src + koff, block_len)
+                                                   : HashBlockSampled(src + koff, block_len);
           region.block_frame[k] = 0;
           region.block_dirty[k] = 0;
         }
@@ -426,14 +428,26 @@ bool BufferCache::UploadRegion(D3D12Context& context, ID3D12GraphicsCommandList*
     ++stats_.upload_failures;
     return false;
   }
-  SwapCopy(static_cast<uint8_t*>(staging.cpu), src, region.size, swap);
+  std::vector<uint8_t> inline_snapshot;
+  const uint8_t* upload_src = src;
+  if (region.exact_hash) {
+    try {
+      inline_snapshot.assign(src, src + region.size);
+    } catch (const std::bad_alloc&) {
+      stats_.last_failure = "inline snapshot allocation failed";
+      ++stats_.upload_failures;
+      return false;
+    }
+    upload_src = inline_snapshot.data();
+  }
+  SwapCopy(static_cast<uint8_t*>(staging.cpu), upload_src, region.size, swap);
   // TEMP DIAG (MESHSTALE): hash of the GUEST bytes this upload carried, so a
   // later draw can ask whether the GPU's copy still matches guest memory. Reads
   // `src` -- ordinary cached memory -- exactly as the note below prescribes.
   // Whole-region hash, read by nothing but the MESHCHK probe (VerifyRegion);
   // it re-read every uploaded byte, ~14 MB a frame in gameplay.
   region.content_hash =
-      REXCVAR_GET(mcla_native_gfx_diag) ? HashGuestBytes(src, region.size) : 0;
+      REXCVAR_GET(mcla_native_gfx_diag) ? HashGuestBytes(upload_src, region.size) : 0;
   {
     region.block_hash.assign(blocks, 0);
     region.block_frame.assign(blocks, 0);
@@ -441,7 +455,9 @@ bool BufferCache::UploadRegion(D3D12Context& context, ID3D12GraphicsCommandList*
     region.whole_dirty = false;
     for (uint32_t b = 0; b < blocks; ++b) {
       const uint32_t off = b * kVerifyBlock;
-      region.block_hash[b] = HashBlockSampled(src + off, std::min(kVerifyBlock, region.size - off));
+      const uint32_t len = std::min(kVerifyBlock, region.size - off);
+      region.block_hash[b] = region.exact_hash ? HashGuestBytes(upload_src + off, len)
+                                               : HashBlockSampled(src + off, len);
     }
   }
   // The content hash lived here and has been removed. It answered its question
@@ -481,7 +497,7 @@ bool BufferCache::UploadRegion(D3D12Context& context, ID3D12GraphicsCommandList*
 
 bool BufferCache::Resolve(D3D12Context& context, ID3D12GraphicsCommandList* cl,
                           uint32_t guest_address, uint32_t size, BufferSwap swap,
-                          BufferBinding& out) {
+                          BufferBinding& out, bool exact_inline) {
   out = BufferBinding{};
   // Guest buffer addresses arrive spelled two different ways: a vertex
   // stream's comes from the fetch constant and is already physical
@@ -527,6 +543,14 @@ bool BufferCache::Resolve(D3D12Context& context, ID3D12GraphicsCommandList* cl,
       memo.region = region;
     }
   }
+  // Inline vertices reuse command-buffer memory and may be rewritten between
+  // draws in the same frame. Promote their cache region to exact block hashes;
+  // sampled hashes can miss those rewrites and draw last frame's UI geometry.
+  if (region && exact_inline && !region->exact_hash) {
+    region->exact_hash = true;
+    region->dirty = true;
+    region->whole_dirty = true;
+  }
   // The readability check exists to keep UploadRegion from reading unmapped
   // guest pages, so it belongs on the paths that actually read them. Running it
   // first cost the whole frame: IsPhysicalRangeReadable walks the page table of
@@ -555,13 +579,13 @@ bool BufferCache::Resolve(D3D12Context& context, ID3D12GraphicsCommandList* cl,
   //
   // This re-checks the region's own hash against guest memory and marks it
   // dirty when they differ, which turns a lost notification into a re-upload
-  // instead of a corrupt draw. Once per region per frame: a region bound by
-  // twenty draws is hashed once, and only regions something actually binds are
-  // touched at all.
+  // instead of a corrupt draw. Inline draws are checked every time because the
+  // command-buffer slot can be reused between draws in one frame.
   // For a streaming region this is not a backstop but the only thing that
   // reports the guest's writes, so it runs whether or not the backstop is on.
+  // Inline regions always use exact hashes; other regions keep the sampled path.
   if (region && !region->dirty && !region->block_hash.empty() &&
-      (region->streaming || REXCVAR_GET(mcla_native_gfx_verify_regions))) {
+      (region->exact_hash || region->streaming || REXCVAR_GET(mcla_native_gfx_verify_regions))) {
     // Only the blocks this request actually reads, and each at most once a
     // frame. Verifying the whole region was correct and cost 25 MB of hashing
     // per frame (wall ~55 ms -> ~150 ms); a draw cannot be corrupted by bytes
@@ -575,18 +599,25 @@ bool BufferCache::Resolve(D3D12Context& context, ID3D12GraphicsCommandList* cl,
       const uint32_t frame32 = uint32_t(frame_) + 1u;  // 0 means "never checked", unique per frame
       bool checked_any = false;
       for (uint32_t b = first; b <= last; ++b) {
-        if (region->block_frame[b] == frame32) {
+        const bool checked_this_frame = region->block_frame[b] == frame32;
+        if (!exact_inline && checked_this_frame) {
           continue;
         }
         region->block_frame[b] = frame32;
-        checked_any = true;
+        checked_any |= !checked_this_frame;
         const uint32_t off = b * kVerifyBlock;
         const uint32_t len = std::min(kVerifyBlock, region->size - off);
-        stats_.verify_bytes += 512u;  // eight 64-byte slices, not the block
+        stats_.verify_bytes += region->exact_hash ? len : 512u;
         ++stats_.verify_regions;
-        if (HashBlockSampled(p + off, len) != region->block_hash[b]) {
+        const uint64_t hash = region->exact_hash ? HashGuestBytes(p + off, len)
+                                                 : HashBlockSampled(p + off, len);
+        if (hash != region->block_hash[b]) {
           region->dirty = true;
-          region->whole_dirty = true;
+          if (region->exact_hash) {
+            region->block_dirty[b] = 1;
+          } else {
+            region->whole_dirty = true;
+          }
           ++stats_.verify_catches;
           if (region->streaming) {
             ++stats_.verify_catches_streaming;
@@ -741,6 +772,7 @@ bool BufferCache::Resolve(D3D12Context& context, ID3D12GraphicsCommandList* cl,
     Region fresh;
     fresh.base = lo;
     fresh.size = hi - lo;
+    fresh.exact_hash = exact_inline;
     D3D12_RESOURCE_STATES initial_state = D3D12_RESOURCE_STATE_COPY_DEST;
     fresh.resource = AcquireBuffer(context, fresh.size, &initial_state);
     if (!fresh.resource) {

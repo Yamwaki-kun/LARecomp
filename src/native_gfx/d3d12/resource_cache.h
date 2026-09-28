@@ -153,7 +153,8 @@ class BufferCache {
   // the offset of that range inside it. Records any upload on the current
   // frame's command list. Returns false on failure (diagnosed via stats).
   bool Resolve(D3D12Context& context, ID3D12GraphicsCommandList* cl, uint32_t guest_address,
-               uint32_t size, BufferSwap swap, BufferBinding& out);
+               uint32_t size, BufferSwap swap, BufferBinding& out,
+               bool exact_inline = false);
 
   // Marks every region intersecting the range dirty; they re-upload on the
   // next Resolve.
@@ -243,6 +244,8 @@ class BufferCache {
     // block bound by twenty draws is checked once a frame.
     std::vector<uint64_t> block_hash;
     std::vector<uint32_t> block_frame;
+    // Inline command-buffer data uses exact hashes and must be checked per draw.
+    bool exact_hash = false;
     // Which of those blocks an exact range (write watch or guest unlock) has
     // touched since the last upload, so a re-upload can send just them. The
     // watch reports whole pages, so a region dirtied by it is otherwise mostly
@@ -250,9 +253,8 @@ class BufferCache {
     // ~18 MB re-sent whole.
     //
     // `whole_dirty` is for dirt that has no exact extent -- a new region, or a
-    // sampled-hash mismatch. The hash only reads 512 bytes of every block, so a
-    // mismatch in one block says nothing reliable about the others; those keep
-    // the whole-region re-upload they always had.
+    // sampled-hash mismatch. The sampled hash only reads part of each block, so
+    // a mismatch cannot safely identify which bytes changed.
     std::vector<uint8_t> block_dirty;
     bool whole_dirty = true;
 
