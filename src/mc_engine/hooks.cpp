@@ -58,6 +58,7 @@
 #include "cutscene_gallery.h"
 #include "map_mouse.h"
 #include "modloader/features/mod_breakables.h"
+#include "modloader/features/mod_glows.h"
 #include "camera_look.h"
 #include "texture_dump.h"
 #include "online/online_common.h"  // shared guest-memory helpers (IsGuestPtr, ...)
@@ -3825,6 +3826,7 @@ void Patch_DeltaTimePre() {
     TickHudUnits();             // hud_speed_units: mph -> km/h, live
     TickCutsceneGallery();      // cutscene replay: close the menu, start the script
     TickMapMouse();             // full map: notices the screen closed, frees the cursor
+    TickModGlows();             // guest scratch for the mods' light glows
     TickModBreakables();        // mods' breakable sector props: knock-over on a hard hit
     TickCameraLook();           // cam_freelook: mouse -> gameplay camera lookaround
     RpcOnRaceTick();            // Discord RPC: race name + series/tournament standings
