@@ -57,6 +57,7 @@
 #include "hud_units.h"
 #include "cutscene_gallery.h"
 #include "map_mouse.h"
+#include "modloader/features/mod_breakables.h"
 #include "camera_look.h"
 #include "texture_dump.h"
 #include "online/online_common.h"  // shared guest-memory helpers (IsGuestPtr, ...)
@@ -3824,6 +3825,7 @@ void Patch_DeltaTimePre() {
     TickHudUnits();             // hud_speed_units: mph -> km/h, live
     TickCutsceneGallery();      // cutscene replay: close the menu, start the script
     TickMapMouse();             // full map: notices the screen closed, frees the cursor
+    TickModBreakables();        // mods' breakable sector props: knock-over on a hard hit
     TickCameraLook();           // cam_freelook: mouse -> gameplay camera lookaround
     RpcOnRaceTick();            // Discord RPC: race name + series/tournament standings
     ApplyAmbientDensityTuning();  // no-op unless an ambient cvar moved

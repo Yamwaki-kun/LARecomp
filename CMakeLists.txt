@@ -67,6 +67,7 @@ set(LARECOMP_SOURCES
 
     # Runtime features backed by per-mod sidecar data.
     src/mc_engine/modloader/features/mod_data.cpp
+    src/mc_engine/modloader/features/mod_breakables.cpp
 
     # Online (split out of hooks.cpp): tournament / System Link / Xbox LIVE
     src/mc_engine/online/online_common.cpp
