@@ -69,6 +69,7 @@ set(LARECOMP_SOURCES
     src/mc_engine/modloader/features/mod_data.cpp
     src/mc_engine/modloader/features/mod_glows.cpp
     src/mc_engine/modloader/features/mod_breakables.cpp
+    src/mc_engine/modloader/features/mod_lights.cpp
 
     # Online (split out of hooks.cpp): tournament / System Link / Xbox LIVE
     src/mc_engine/online/online_common.cpp
