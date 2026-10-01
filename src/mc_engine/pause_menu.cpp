@@ -28,6 +28,7 @@
 #include <rex/runtime.h>
 #include <rex/ppc/function.h>
 #include <rex/system/function_dispatcher.h>
+#include <rex/ui/windowed_app_context.h>
 
 REXCVAR_DEFINE_BOOL(show_test_movie, false, "MCLA/Settings",
     "Show the TestMovie debug button in the pause menu")
@@ -42,6 +43,7 @@ namespace {
 
 std::atomic<uint32_t> g_pausetab_addr{0};
 std::atomic<uint32_t> g_settingsmenu_addr{0};
+std::atomic<uint32_t> g_quit_btn_key{0};
 
 constexpr uint32_t kStringTableGlobal  = 0x8286D7FC;
 constexpr uint32_t kVHSMGlobal         = 0x8286D804;
@@ -1702,6 +1704,14 @@ void EnsureSubmenus() {
                 md.label, MenuItemCount(md));
     }
 
+    constexpr const char* kQuitButtonKey = "PM_RxQuit";
+    uint32_t quit = CreateNewMenuState(kQuitButtonKey);
+    uint32_t quit_key = AllocGuestString(kQuitButtonKey);
+    if (!quit || !quit_key) return;
+    GuestAppendMenuItem(settings, quit);
+    EnsureStringTableText(kQuitButtonKey, "QUIT");
+    g_quit_btn_key.store(quit_key, std::memory_order_relaxed);
+
     g_menus_created.store(true, std::memory_order_relaxed);
 }
 
@@ -1916,6 +1926,20 @@ bool Hook_PMLodTrafficClick(PPCRegister& r3, PPCRegister& r31) {
         HandleSubmenuIndexClick(idx);
         // Consume every action press inside the submenu so the game's own
         // handler never resolves the selection against SettingsMenu items.
+        r3.u64 = 1;
+        return true;
+    }
+
+    uint32_t quit_key = g_quit_btn_key.load(std::memory_order_relaxed);
+    if (quit_key && IsGuestButtonClicked(quit_key)) {
+        auto* runtime = rex::Runtime::instance();
+        auto* app_context = runtime ? runtime->app_context() : nullptr;
+        if (app_context) {
+            MC_INFO("[pause-menu] quit requested from Settings");
+            app_context->RequestDeferredQuit();
+        } else {
+            MC_WARN("[pause-menu] quit requested, but app context is unavailable");
+        }
         r3.u64 = 1;
         return true;
     }
