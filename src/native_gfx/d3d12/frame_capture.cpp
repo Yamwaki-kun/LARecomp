@@ -303,6 +303,24 @@ struct Capture {
   RenderTargetKey anchor_key;
   bool has_anchor = false;
 
+  // Which display-shaped target the anchor should be, learned from the frame
+  // before. "The first display-shaped pass of the frame" is not always the
+  // scene: with SHADOWS off and SHADOW PHASES on STOCK (0x61E0), the
+  // shadowFastBlend phase 0x400 still runs and puts a 16-draw display-shaped
+  // pass ahead of the scene. That pass took the anchor, the scene fell into the
+  // composite budget (768), and ~2100 draws a frame were thrown away: measured
+  // acc=16 acc_comp=768 with budget rejections climbing every frame, and a world
+  // of cars and fog on screen. The scene is the display-shaped target that
+  // receives the most colour-writing draws, so count them per target and let
+  // that target take the anchor over when it shows up.
+  static constexpr uint32_t kAnchorCandidates = 8;
+  TargetConfig candidate_config[kAnchorCandidates];
+  uint32_t candidate_draws[kAnchorCandidates] = {};
+  uint32_t candidate_count = 0;
+  TargetConfig preferred_anchor;
+  bool has_preferred_anchor = false;
+  uint32_t anchor_switches = 0;  // session total, for the diag line
+
   // The image read back is NOT the anchor. The anchor is the HDR scene target
   // (1280x720 rt_format=10, R16G16B16A16_FLOAT) — the frame before tonemapping,
   // before the composite, before every lighting resolve is applied. The guest
@@ -1624,9 +1642,35 @@ static void CaptureDrawImpl(const uint8_t* base, uint32_t dev, uint32_t primitiv
   // The anchor is the pass whose image is read back. Size alone does not
   // identify it: a 640x640 shadow/cube target clears any "big" bar. The scene
   // pass is the one shaped like the display, so require the aspect ratio too.
-  if (!g_cap.has_anchor) {
-    const float aspect = hv.height > 0.0f ? hv.width / hv.height : 0.0f;
-    if (hv.width >= 1024.0f && aspect >= 1.5f && aspect <= 2.0f) {
+  //
+  // In continuous mode the first such pass only holds the anchor until the
+  // target that won the previous frame (see preferred_anchor) turns up; draws
+  // already recorded under the first one are unaffected, and anything that
+  // pass draws afterwards is budgeted as auxiliary.
+  const float display_aspect = hv.height > 0.0f ? hv.width / hv.height : 0.0f;
+  const bool display_shaped =
+      hv.width >= 1024.0f && display_aspect >= 1.5f && display_aspect <= 2.0f;
+  if (display_shaped) {
+    if (g_cap.continuous && (rs.color_mask & 0xFu) != 0) {
+      uint32_t i = 0;
+      while (i < g_cap.candidate_count && !(g_cap.candidate_config[i] == cfg)) {
+        ++i;
+      }
+      if (i == g_cap.candidate_count && i < Capture::kAnchorCandidates) {
+        g_cap.candidate_config[i] = cfg;
+        g_cap.candidate_draws[i] = 0;
+        ++g_cap.candidate_count;
+      }
+      if (i < g_cap.candidate_count) {
+        ++g_cap.candidate_draws[i];
+      }
+    }
+    const bool preferred = g_cap.continuous && g_cap.has_preferred_anchor &&
+                           cfg == g_cap.preferred_anchor && !(cfg == g_cap.config);
+    if (!g_cap.has_anchor || preferred) {
+      if (g_cap.has_anchor) {
+        ++g_cap.anchor_switches;
+      }
       g_cap.config = cfg;
       g_cap.anchor_key = PooledKey(cfg);
       g_cap.has_anchor = true;
@@ -1641,9 +1685,7 @@ static void CaptureDrawImpl(const uint8_t* base, uint32_t dev, uint32_t primitiv
   // composite flat, with no tonemap and no 2D/UI). The anchor (HDR scene) also
   // matches this shape but takes the cfg==config path above, so is_display only
   // ever selects the composite here.
-  const float display_aspect = hv.height > 0.0f ? hv.width / hv.height : 0.0f;
-  const bool is_display = hv.width >= 1024.0f && display_aspect >= 1.5f &&
-                          display_aspect <= 2.0f && (rs.color_mask & 0xFu) != 0;
+  const bool is_display = display_shaped && (rs.color_mask & 0xFu) != 0;
   if (!(g_cap.has_anchor && cfg == g_cap.config)) {
     // An auxiliary pass. Budgeted separately so the anchor cannot starve it,
     // and vice versa.
@@ -6406,6 +6448,33 @@ void ResetContinuousFrame(RenderTargetPool& render_targets) {
   // each frame, so without this the one-shot clear latch leaves moving objects
   // (the helicopter, traffic) trailing their previous positions.
   render_targets.MarkAllUncleared();
+  // The display-shaped target with the most colour-writing draws this frame is
+  // the one the next frame anchors on. A frame with none keeps the old choice.
+  if (g_cap.candidate_count != 0) {
+    uint32_t best = 0;
+    for (uint32_t i = 1; i < g_cap.candidate_count; ++i) {
+      if (g_cap.candidate_draws[i] > g_cap.candidate_draws[best]) {
+        best = i;
+      }
+    }
+    const TargetConfig& winner = g_cap.candidate_config[best];
+    if (!g_cap.has_preferred_anchor || !(winner == g_cap.preferred_anchor)) {
+      if (REXCVAR_GET(mcla_native_gfx_diag)) {
+        if (FILE* f = std::fopen("native_gfx_diag.txt", "ab")) {
+          std::fprintf(f,
+                       "ANCHOR preferred %ux%u rt=%u ds=%u msaa=%u pitch=%u with %u draws "
+                       "(%u candidates, %u switches so far)\n",
+                       winner.width, winner.height, winner.rt_format, winner.ds_format,
+                       winner.guest_msaa, winner.surface_pitch, g_cap.candidate_draws[best],
+                       g_cap.candidate_count, g_cap.anchor_switches);
+          std::fclose(f);
+        }
+      }
+      g_cap.preferred_anchor = winner;
+      g_cap.has_preferred_anchor = true;
+    }
+    g_cap.candidate_count = 0;
+  }
   // Keep every cache (targets, resolves, textures, buffers, PSOs). Only the
   // per-frame bookkeeping is cleared so the next frame re-arms and re-selects
   // its anchor/readback without the one-shot latch.
