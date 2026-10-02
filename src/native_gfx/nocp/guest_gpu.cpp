@@ -84,6 +84,7 @@ struct State {
   std::atomic<uint32_t> ring_end{0};        // dev+14908, the command buffer end
   std::atomic<uint32_t> wb_fence{0};        // *(block + 0), the retired fence
   std::atomic<uint32_t> wb_consumed{0};     // *(block + 4), ring consumption
+  std::atomic<uint32_t> wb_alloc_consumed{0};  // *(block + 60), allocator read cursor
   std::atomic<uint32_t> write_ptr{0};
   std::atomic<uint32_t> kick_limit{0};
   std::atomic<bool> installed{false};
@@ -204,19 +205,15 @@ void RetireGuestFences(uint8_t* base, uint32_t device_va) {
 
 // Retires the ring itself.
 //
-// The 96-byte block behind dev+10896 holds TWO writeback words that hardware
-// fills in, and D3DDevice_SetRingBufferParameters initializes both:
+// The block behind dev+10896 holds hardware writebacks and the consumer cursors
+// polled by the guest ring allocators:
 //
 //   *(block + 0) = dev[10908] - 2;                 // the retired fence
 //   *(block + 4) = dev[14920] & 3 | dev[48];       // ring consumption
 //
-// The second one is what the ring allocator waits on. sub_82411180, reached
-// from D3DDevice_RingBufferAlloc, spins while the wrap counter in the low two
-// bits disagrees or while the position it wants is past what has been
-// consumed. Measured: the title ran 22500 hooked D3D calls and then stopped
-// inside D3DDevice_BeginVertices, which ends in exactly that allocation --
-// with the fence pair caught up and the command buffer nowhere near full,
-// because it was never the fence or the space.
+// Both +4 and +60 are polled by ring-space waits: sub_82411180 reads +4, while
+// sub_82411218 reads +60. Advancing only +4 strands the latter even after the
+// fence and the other allocator's cursor have caught up.
 //
 // Publishing "consumed everything" is true here for the same reason retiring
 // every fence is: the ring goes nowhere. dev+14908 is the end of the command
@@ -234,7 +231,7 @@ void RetireRingConsumption(uint8_t* base, uint32_t device_va) {
     return __builtin_bswap32(v);
   };
   const uint32_t block = load_be(device_va + 10896);
-  if (block < 0x1000u || !IsGuestRangeReadable(block, 8)) {
+  if (block < 0x1000u || !IsGuestRangeReadable(block, 64)) {
     return;
   }
   const uint32_t wrap = load_be(device_va + 14920) & 3u;
@@ -246,17 +243,24 @@ void RetireRingConsumption(uint8_t* base, uint32_t device_va) {
   s.ring_end.store(buffer_end, std::memory_order_relaxed);
   s.wb_fence.store(load_be(block + 0), std::memory_order_relaxed);
   s.wb_consumed.store(load_be(block + 4), std::memory_order_relaxed);
+  s.wb_alloc_consumed.store(load_be(block + 60), std::memory_order_relaxed);
   if (!buffer_end) {
     return;
   }
   const uint32_t consumed = (buffer_end & ~3u) | wrap;
-  if (load_be(block + 4) == consumed) {
-    return;
-  }
   const uint32_t be = __builtin_bswap32(consumed);
-  std::memcpy(rex::memory::GuestPtr(base, block + 4), &be, 4);
-  s.last_consumed.store(consumed, std::memory_order_relaxed);
-  s.ring_publishes.fetch_add(1, std::memory_order_relaxed);
+  bool published = false;
+  for (const uint32_t offset : {4u, 60u}) {
+    if (load_be(block + offset) == consumed) {
+      continue;
+    }
+    std::memcpy(rex::memory::GuestPtr(base, block + offset), &be, 4);
+    published = true;
+  }
+  if (published) {
+    s.last_consumed.store(consumed, std::memory_order_relaxed);
+    s.ring_publishes.fetch_add(1, std::memory_order_relaxed);
+  }
 }
 
 // Delivers one vblank to the guest, the same way
@@ -423,7 +427,8 @@ std::string Summary() {
   std::snprintf(buf, sizeof(buf),
                 "installed=%d vblanks=%llu flips=%llu front_buffer=%08X ring_kicks=%llu | "
                 "fence issued=%u retired=%u published=%llu | wptr=%08X limit=%08X "
-                "idle_spin=%u | ring pub=%llu wrap=%u end=%08X wb_fence=%08X wb_consumed=%08X | "
+                "idle_spin=%u | ring pub=%llu wrap=%u end=%08X wb_fence=%08X "
+                "wb_consumed=%08X/%08X | "
                 "hooks=%llu frames=%llu swaps=%llu last=%s",
                 s.installed.load(std::memory_order_relaxed) ? 1 : 0,
                 (unsigned long long)s.vblanks.load(std::memory_order_relaxed),
@@ -441,6 +446,7 @@ std::string Summary() {
                 s.ring_end.load(std::memory_order_relaxed),
                 s.wb_fence.load(std::memory_order_relaxed),
                 s.wb_consumed.load(std::memory_order_relaxed),
+                s.wb_alloc_consumed.load(std::memory_order_relaxed),
                 (unsigned long long)HookCallCount(), (unsigned long long)FrameEndCount(),
                 (unsigned long long)SwapCount(), LastHookName());
   return std::string(buf);
