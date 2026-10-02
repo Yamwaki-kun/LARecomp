@@ -25888,15 +25888,18 @@ name = "MCLA_DriverAnimName"
 registers = ["r1"]
 
 # BadassBaboon's Recomp Adjustments: Continuous-time exponential decay camera smoothing
-# 0x82320468: addi r9, r1, 0x50 in sub_82320298 (mcPlayerCamera::Update).
-# f13 is the camera position chase/lag smoothing factor S1 right before storage.
+# 0x82320468: addi r9, r1, 0x50 in sub_82320298 -- camBoomCS::Update, slot 10 of the
+# camBoomCS vtable at 0x82044DB4. That vtable is untyped in the IDB, so the only xref IDA
+# shows is the .pdata entry; it IS the gameplay camera: mcPlayerCamera (sub_822B1B58) owns
+# six camBoomCS (bumper, POV, boom1-3, reverse) and camViewCS::Update calls slot 10.
+# f13 is the VelocityFilter tune factor (tune+224), halved by the game below 60 FPS.
 [[midasm_hook]]
 name = "MCLACameraPosSmoothing"
 address = 0x82320468
 registers = ["f13"]
 
-# 0x823204F4: li r9, 0x120 in sub_82320298 (mcPlayerCamera::Update).
-# f0 is the camera look-at / orientation smoothing factor S2 right before storage.
+# 0x823204F4: li r9, 0x120 in sub_82320298 (camBoomCS::Update).
+# f0 is the AccelFilter tune factor (tune+228), halved by the game below 60 FPS.
 [[midasm_hook]]
 name = "MCLACameraLookAtSmoothing"
 address = 0x823204F4
@@ -26486,16 +26489,16 @@ jump_address_on_true = 0x826253F4
 
 # Gameplay camera: anchor the probe on a function that provably runs.
 #
-# Two earlier attempts were aimed at what looked like the gameplay camera and
-# neither fired once, though both were emitted into generated/ and verified
-# there: sub_82320298 ("mcPlayerCamera::Update", whose only cross-reference is
-# a vtable slot at 0x8210E680) and sub_82316148 (the camera preset switcher).
-# The whole 0x8231xxxx camera family appears to be dead in this build.
-#
-# Worth knowing separately: the two camera-smoothing hooks that already live
-# inside sub_82320298 -- MCLACameraPosSmoothing @0x82320468 and
-# MCLACameraLookAtSmoothing @0x823204F4 -- are in exactly the same position and
-# have therefore probably never done anything. Re-check before trusting them.
+# CORRECTION (2026-09-28): sub_82320298 does run. It is camBoomCS::Update, slot
+# 10 of the vtable at 0x82044DB4 -- untyped in the IDB, which is why the only
+# xref IDA lists is the .pdata entry at 0x8210E680. mcPlayerCamera
+# (sub_822B1B58) owns six camBoomCS objects (bumper, POV, boom1-3, reverse) and
+# camViewCS::Update (sub_8271EC70) calls slot 10 of the active one every frame,
+# so MCLACameraPosSmoothing / MCLACameraLookAtSmoothing are live, and a
+# frame_pacing_trace of free roam logs camBoomCS as the active state on every
+# camera. The earlier note below claimed the opposite; the hook that "never
+# fired" was a probe in a path the tested camera did not take. camTrackCS
+# (sub_8231CE30) is the cinematic / pause / wipeout family.
 #
 # sub_822C0320 is the camera system tick, and it certainly executes: it is
 # where Patch_DebugCamGate (0x822C0644) and Patch_DebugCam (0x822C0668) live,
@@ -26589,10 +26592,12 @@ registers = ["r30"]
 # whole reason free look stops walking through walls: Hook_CameraMatrixPublish
 # turns the finished matrix, which is downstream of all of this.
 #
-# NOTE this is not the family that was written off as dead. sub_82320298 and
-# sub_82316148 have a single xref each and it is a .pdata entry, not a vtable
-# slot -- they really are unreachable. sub_8231CE30 has a real vtable slot at
-# 0x82044A04 and a real caller in sub_8231CF48.
+# NOTE sub_8231CE30 is camTrackCS (vtable slot at 0x82044A04, caller
+# sub_8231CF48): the cinematic / pause / wipeout cameras, not the gameplay ones.
+# The gameplay cameras are camBoomCS, whose update is sub_82320298 -- it looked
+# unreachable only because its vtable (0x82044DB4) is untyped in the IDB, so a
+# .pdata entry was the one xref IDA listed. Rotating a camTrackCS does not move
+# the gameplay view.
 [[midasm_hook]]
 address = 0x8231CEB0
 name = "Hook_CameraStateUpdate"
