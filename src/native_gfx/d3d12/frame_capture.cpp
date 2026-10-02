@@ -27,6 +27,7 @@
 #include <rex/ui/d3d12/d3d12_api.h>
 #include <rex/ui/d3d12/d3d12_util.h>
 #include <rex/ui/flags.h>
+#include <dxgi1_4.h>
 
 #include "../draw_slicing.h"
 #include "../geometry.h"
@@ -252,6 +253,43 @@ constexpr float kClearColor[4] = {0.02f, 0.02f, 0.04f, 0.0f};
 // The guest viewport decides the target size; this only bounds a nonsensical
 // register read so a bad value cannot ask for a gigabyte of render target.
 constexpr uint32_t kMaxTargetDimension = 4096;
+constexpr uint64_t kLowVramThreshold = 512ull * 1024ull * 1024ull;
+
+uint64_t AdapterDedicatedMemory(ID3D12Device* device) {
+  static const uint64_t memory = [device]() {
+    if (!device) {
+      return uint64_t{0};
+    }
+    Microsoft::WRL::ComPtr<IDXGIFactory4> factory;
+    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
+      return uint64_t{0};
+    }
+    Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
+    if (FAILED(factory->EnumAdapterByLuid(device->GetAdapterLuid(), IID_PPV_ARGS(&adapter)))) {
+      return uint64_t{0};
+    }
+    DXGI_ADAPTER_DESC1 desc{};
+    if (FAILED(adapter->GetDesc1(&desc))) {
+      return uint64_t{0};
+    }
+    return static_cast<uint64_t>(desc.DedicatedVideoMemory);
+  }();
+  return memory;
+}
+
+uint32_t DefaultAuxStage(ID3D12Device* device) {
+  static const uint32_t stage = [device]() {
+    const uint64_t memory = AdapterDedicatedMemory(device);
+    if (memory != 0 && memory < kLowVramThreshold) {
+      REXLOG_WARN("[native_gfx] adapter has {:.0f} MiB dedicated VRAM; non-display auxiliary "
+                  "draw passes are disabled in continuous mode to avoid D3D12 TDRs",
+                  double(memory) / (1024.0 * 1024.0));
+      return 2u;
+    }
+    return 3u;
+  }();
+  return stage;
+}
 
 inline uint32_t R32(const uint8_t* base, uint32_t ea) {
   if (ea < 0x1000u) {
@@ -1468,6 +1506,9 @@ static void CaptureDrawImpl(const uint8_t* base, uint32_t dev, uint32_t primitiv
                             const InlineGeometry* inline_geom) {
   if (g_cap.finished || draw_limit == 0) {
     return;
+  }
+  if (g_cap.continuous && aux_stage == 0) {
+    aux_stage = DefaultAuxStage(context.device());
   }
   // The TEMP DIAG / TEMP INSTRUMENTATION blocks below run only with the master
   // switch on, or in the one-shot capture, whose report is built from them.
@@ -3991,9 +4032,9 @@ static void CaptureDrawImpl(const uint8_t* base, uint32_t dev, uint32_t primitiv
       }
     }
   }
-  if (is_aux && aux_stage < 2) {
+  if (is_aux && !is_display && aux_stage < 2) {
     // Stage 1: the target was created; record nothing with it.
-    if (is_display) ++g_cap.accepted_composite; else ++g_cap.accepted_aux;
+    ++g_cap.accepted_aux;
     return;
   }
   render_targets.FlushPendingCopies(context, cl);
@@ -4725,9 +4766,9 @@ static void CaptureDrawImpl(const uint8_t* base, uint32_t dev, uint32_t primitiv
     ++g_cap.state_skips;
   }
 
-  if (is_aux && aux_stage < 3) {
+  if (is_aux && !is_display && aux_stage < 3) {
     // Stage 2: bound and cleared, but no draw recorded.
-    if (is_display) ++g_cap.accepted_composite; else ++g_cap.accepted_aux;
+    ++g_cap.accepted_aux;
     if (++g_cap.draws_in_batch >= kDrawsPerBatch) {
       FlushBatch(context);
     }

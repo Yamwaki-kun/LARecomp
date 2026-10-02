@@ -159,11 +159,11 @@ REXCVAR_DEFINE_UINT32(mcla_native_gfx_capture_delay, 0, "MCLA/NativeGfx",
                       "image. Set e.g. 300 to capture a fully-streamed, well-exposed frame.");
 
 REXCVAR_DEFINE_UINT32(mcla_native_gfx_auxstage, 0, "MCLA/NativeGfx",
-                      "Diagnostic: how far to take auxiliary (non-anchor) passes. "
-                      "0 = not rendered at all. 1 = acquire the pooled target only. "
-                      "2 = also bind it and clear. 3 = also record the draw. "
-                      "A single auxiliary draw hangs the GPU, so this bisects which "
-                      "stage does it: resource creation, binding, or the draw itself.");
+                      "Continuous mode: automatic auxiliary-pass safety policy. "
+                      "0 = stage 3 normally, but stage 2 on adapters with under 512 MiB "
+                      "dedicated VRAM; display/UI passes are not suppressed by this policy. "
+                      "1 = acquire auxiliary targets, 2 = bind and clear without non-display "
+                      "auxiliary draws, 3 = draw all auxiliary passes.");
 
 REXCVAR_DEFINE_BOOL(mcla_native_gfx_msaa_depth_cs, true, "MCLA/NativeGfx",
                     "Resolve a multisampled depth surface with the compute pass. Off restores "
@@ -1125,15 +1125,10 @@ void TryFirstDraw(const uint8_t* base, uint32_t dev, uint32_t primitive_type,
   // frame_capture); it just needs a non-zero value so the draw is not skipped.
   const uint32_t capture_limit =
       want_continuous ? 1000000u : uint32_t(REXCVAR_GET(mcla_native_gfx_capture));
-  // Auxiliary passes render fully in continuous mode (aux_stage 3) by default,
-  // BUT an explicit mcla_native_gfx_auxstage override is honoured even in
-  // continuous mode. This matters because a single auxiliary-pass draw can hang
-  // the GPU (DEVICE_HUNG TDR, confirmed by DRED: an auxiliary DrawIndexedInstanced
-  // never completes). Setting auxstage=2 (bind+clear, no aux draw) lets that be
-  // bisected — and used as a stopgap — without leaving continuous mode. 0 is
-  // treated as "use the default 3" so the untouched default keeps full passes.
+  // Zero selects the adapter-aware default in CaptureDrawImpl. Non-zero values
+  // remain explicit overrides, including stage 3 on low-memory adapters.
   const uint32_t aux_override = uint32_t(REXCVAR_GET(mcla_native_gfx_auxstage));
-  const uint32_t aux_stage = want_continuous ? (aux_override ? aux_override : 3u) : aux_override;
+  const uint32_t aux_stage = aux_override;
   if (capture_limit) {
     // Multi-draw capture supersedes the single-draw diagnostic: both write to
     // the same subsystems, and running them together would interleave two
@@ -1600,7 +1595,7 @@ void NoteEndVertices(const uint8_t* base, uint32_t dev) {
     return;
   }
   const uint32_t aux_override = uint32_t(REXCVAR_GET(mcla_native_gfx_auxstage));
-  const uint32_t aux_stage = want_continuous ? (aux_override ? aux_override : 3u) : aux_override;
+  const uint32_t aux_stage = aux_override;
   // The RAW return value, not the page-fixed one. sub_8241CD88 applies
   //   (((v >> 20) + 512) & 0x1000) + (v & 0x1FFFFFFF)
   // only to the copy it writes into the FETCH CONSTANT, i.e. the address the
