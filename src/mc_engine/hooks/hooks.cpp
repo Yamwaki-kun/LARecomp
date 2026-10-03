@@ -1,76 +1,27 @@
+// Entry points of the hook layer. InitHooks() runs once at startup, before any
+// guest code, and Patch_DeltaTimePre() is the per-frame tick the features hang
+// off. The hooks themselves live in the other files of this folder, one per
+// category; what they share is in hooks_internal.h.
+
 #ifndef REXGLUE_HAS_XEO3_TARGET
 #include <rex/cvar.h>
-#include <rex/ppc.h>
-#include <rex/system/kernel_state.h>
-#include <algorithm>
 #include <atomic>
-#include <cctype>
-#include <chrono>
-#include <cstdint>
-#include <cmath>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <set>
-#include <ctime>
-#include <filesystem>
-#include <fstream>
-#include <iterator>
-#include <map>
-#include <mutex>
 #include <string>
-#include <thread>
-#include <vector>
-#if defined(_M_X64) || defined(__x86_64__)
-#include <immintrin.h>
-#endif
-#include <rex/chrono/clock.h>
-#include <rex/runtime.h>
-#include <rex/perf/counter.h>
-#include "../guest_profiler.h"
-#include "../draw_stats.h"
-#include <rex/system/xmemory.h>
-#include <rex/graphics/xenos.h>
-#include <rex/graphics/pipeline/texture/info.h>
-#include <rex/input/input.h>
-#include <rex/input/input_system.h>
-#include <rex/ui/imgui_dialog.h>
-#include <rex/ui/window.h>
-#if defined(_WIN32)
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <Windows.h>
-#endif
-#include "imgui.h"
-#include "../logging.h"
+#include <string_view>
+
 #include "hooks.h"
 #include "hooks_internal.h"
 #include "discord_rpc/discord_rpc.h"
-#include "../graphics_button.h"
-#include "larecomp_log.h"
-#include "../menu_camera.h"
-#include "../modloader/modloader.h"
-#include "../mp3custom/mp3custom.h"
-#include "../hud_units.h"
+#include "../camera_look.h"
 #include "../cutscene_gallery.h"
+#include "../hud_units.h"
 #include "../map_mouse.h"
 #include "../modloader/features/mod_breakables.h"
 #include "../modloader/features/mod_glows.h"
-#include "../camera_look.h"
-#include "../texture_dump.h"
-#include "../online/online_common.h"  // shared guest-memory helpers (IsGuestPtr, ...)
+#include "../modloader/modloader.h"
+#include "../mp3custom/mp3custom.h"
 
 REXCVAR_DECLARE(std::string, aspect_ratio);  // graphics.cpp
-
-// CVAR DEFINITIONS (Will appear in F4 menu)
-// The '.lifecycle(kRequiresRestart)' forces the user to restart the game if they change the value.
-
-// NOTE: the online cvars (online_ignore_content_check, online_diag) moved to
-// src/mc_engine/online/system_link.cpp along with the hooks that use them.
 
 void InitHooks() {
     // Builds xarchive_mods.rpf from models/*.obj. Must run before guest code
@@ -189,8 +140,6 @@ void InitHooks() {
 
     StartFreezeWatchdog();
 }
-
-// HOOK FUNCTIONS (Called in the middle of translated Assembly execution)
 
 // Fires at 0x822C22EC, right after the clock update (sub_821BDA90). The delta
 // time itself is delivered at the clock source (MCLAFrameDelta /

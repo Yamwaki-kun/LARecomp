@@ -139,7 +139,7 @@ These are the environment variables the build reads. Everything else moved to cv
 
 ## Working on the code
 
-Engine patches are `[[midasm_hook]]` entries in `larecomp_config.toml`, implemented in `src/mc_engine/hooks/`:
+Engine patches are `[[midasm_hook]]` entries in `larecomp_config.toml`, implemented in `src/mc_engine/hooks/`, one file per category:
 
 ```toml
 [[midasm_hook]]

@@ -25,6 +25,9 @@ set(LARECOMP_SOURCES
     src/crash_handler.cpp
 
     src/mc_engine/threading.cpp
+
+    # Guest hooks, one file per category. hooks.cpp holds InitHooks and the
+    # per-frame Patch_DeltaTimePre; hooks_internal.h is what the files share.
     src/mc_engine/hooks/hooks.cpp
     src/mc_engine/hooks/ui.cpp
     src/mc_engine/hooks/world_tuning.cpp
@@ -42,6 +45,7 @@ set(LARECOMP_SOURCES
     src/mc_engine/hooks/mods.cpp
     src/mc_engine/hooks/discord.cpp
     src/mc_engine/hooks/diagnostics.cpp
+
     src/mc_engine/guest_profiler.cpp
     src/mc_engine/carbon_parts.cpp
     src/mc_engine/graphics_button.cpp
