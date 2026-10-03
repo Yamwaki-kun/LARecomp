@@ -1,10 +1,10 @@
 #ifndef REXGLUE_HAS_XEO3_TARGET
 //
-// Guest-memory helpers shared by the online hook modules and hooks.cpp.
+// Guest-memory helpers shared by the online hook modules and mc_engine/hooks/.
 //
 // These used to live in an anonymous namespace in hooks.cpp (internal linkage),
 // so the split-out online translation units could not link against them. They
-// now have external linkage here; hooks.cpp and online/*.cpp both use them via
+// now have external linkage here; hooks/*.cpp and online/*.cpp both use them via
 // online_common.h.
 //
 

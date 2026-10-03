@@ -139,7 +139,7 @@ These are the environment variables the build reads. Everything else moved to cv
 
 ## Working on the code
 
-Engine patches are `[[midasm_hook]]` entries in `larecomp_config.toml`, implemented in `src/mc_engine/hooks.cpp`:
+Engine patches are `[[midasm_hook]]` entries in `larecomp_config.toml`, implemented in `src/mc_engine/hooks/`:
 
 ```toml
 [[midasm_hook]]
@@ -160,7 +160,7 @@ cmake --build out/build/win-amd64-relwithdebinfo
 
 Pass the **manifest**, not the config. The manifest includes the config and sets up module dependencies.
 
-**Never edit anything in `generated/`.** Codegen rewrites the whole directory. Hooks survive regeneration because they live in the config and in `hooks.cpp`; hand edits do not.
+**Never edit anything in `generated/`.** Codegen rewrites the whole directory. Hooks survive regeneration because they live in the config and in `src/mc_engine/hooks/`; hand edits do not.
 
 ### Layout
 

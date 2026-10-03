@@ -11,7 +11,7 @@
 #include "larecomp_log.h"
 #include "crash_handler.h"
 #include "achievement_metadata.h"
-#include "mc_engine/hooks.h"
+#include "mc_engine/hooks/hooks.h"
 #include "native_gfx/nocp/nocp_app.h"
 #include "native_gfx/native_gfx.h"
 #include "native_gfx/d3d12/device_manager.h"

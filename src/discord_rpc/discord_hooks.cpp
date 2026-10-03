@@ -10,7 +10,7 @@
 
 #include <rex/runtime.h>
 
-#include "mc_engine/hooks.h"
+#include "mc_engine/hooks/hooks.h"
 #include "mc_engine/logging.h"
 #include "mc_engine/pause_menu.h"
 

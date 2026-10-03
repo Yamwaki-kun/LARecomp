@@ -27,8 +27,8 @@
 #include <rex/chrono/clock.h>
 #include <rex/runtime.h>
 #include <rex/perf/counter.h>
-#include "guest_profiler.h"
-#include "draw_stats.h"
+#include "../guest_profiler.h"
+#include "../draw_stats.h"
 #include <rex/system/xmemory.h>
 #include <rex/graphics/xenos.h>
 #include <rex/graphics/pipeline/texture/info.h>
@@ -46,22 +46,22 @@
 #include <Windows.h>
 #endif
 #include "imgui.h"
-#include "logging.h"
+#include "../logging.h"
 #include "hooks.h"
 #include "discord_rpc/discord_rpc.h"
-#include "graphics_button.h"
+#include "../graphics_button.h"
 #include "larecomp_log.h"
-#include "menu_camera.h"
-#include "modloader/modloader.h"
-#include "mp3custom/mp3custom.h"
-#include "hud_units.h"
-#include "cutscene_gallery.h"
-#include "map_mouse.h"
-#include "modloader/features/mod_breakables.h"
-#include "modloader/features/mod_glows.h"
-#include "camera_look.h"
-#include "texture_dump.h"
-#include "online/online_common.h"  // shared guest-memory helpers (IsGuestPtr, ...)
+#include "../menu_camera.h"
+#include "../modloader/modloader.h"
+#include "../mp3custom/mp3custom.h"
+#include "../hud_units.h"
+#include "../cutscene_gallery.h"
+#include "../map_mouse.h"
+#include "../modloader/features/mod_breakables.h"
+#include "../modloader/features/mod_glows.h"
+#include "../camera_look.h"
+#include "../texture_dump.h"
+#include "../online/online_common.h"  // shared guest-memory helpers (IsGuestPtr, ...)
 
 // CVAR DEFINITIONS (Will appear in F4 menu)
 // The '.lifecycle(kRequiresRestart)' forces the user to restart the game if they change the value.
@@ -1497,7 +1497,7 @@ struct DebugOption {
     const char* name;
     uint32_t value_addr;  // guest address of node+4
 };
-#include "debug_options_table.inc"
+#include "../debug_options_table.inc"
 
 // Dead registration-stub bytes double as scratch for the value strings.
 static constexpr uint32_t kDbgScratchStart = 0x827A76E0u;

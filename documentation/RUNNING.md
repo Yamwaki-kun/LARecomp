@@ -148,4 +148,4 @@ cmake --build out/build/win-amd64-relwithdebinfo
 
 Pass the manifest, not the config: the manifest includes `larecomp_config.toml` and sets up the module dependency graph.
 
-**Nothing under `generated/` is hand-edited.** Codegen rewrites the whole directory. Engine patches live as `[[midasm_hook]]` entries in the config with implementations in `src/mc_engine/hooks.cpp`, so they survive regeneration.
+**Nothing under `generated/` is hand-edited.** Codegen rewrites the whole directory. Engine patches live as `[[midasm_hook]]` entries in the config with implementations in `src/mc_engine/hooks/`, so they survive regeneration.
