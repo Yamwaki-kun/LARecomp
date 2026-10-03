@@ -74,7 +74,7 @@ extern std::atomic<uint64_t> g_fence_switch_us;
 extern std::atomic<uint64_t> g_limiter_spin_us;
 extern std::atomic<uint64_t> g_limiter_spins;
 
-// hooks.cpp: the timing log
+// timing_log.cpp
 bool TimingLogEnabled();
 void RecordFrameTime();
 extern std::atomic<int32_t> g_substep_last;
