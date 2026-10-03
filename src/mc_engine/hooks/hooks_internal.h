@@ -68,6 +68,11 @@ void TickVinylReadbackWindow();
 void ExportVinyl();
 void ImportVinyl(const std::string& name_in);
 
+// vinyl_shapes.cpp
+void DumpVinylShapes();
+void RequestVinylShapeCapture();
+void TickVinylShapeCapture();
+
 // dev_options.cpp
 void ApplyDebugOptions();
 void ApplyPerfDebugOptions();
