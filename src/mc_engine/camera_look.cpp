@@ -367,7 +367,7 @@ LookTune& TuneFor(uint32_t owner) {
 
 // ── Mouse capture ──────────────────────────────────────────────────────
 //
-// The same shape as the free-fly camera's (hooks.cpp): hide and confine the
+// The same shape as the free-fly camera's (hooks/camera.cpp): hide and confine the
 // pointer, recenter it every frame and take the raw pixel delta. A view that
 // can turn all the way round cannot be driven from an absolute position, and
 // recentering is what keeps the pointer from walking off the window.

@@ -166,52 +166,9 @@ REXCVAR_DEFINE_BOOL(unlock_ride_height, false, "MCLA/Patches", "Allow the full s
 REXCVAR_DEFINE_BOOL(unlock_wheel_fit, false, "MCLA/Patches", "Allow every stock rim size, tire profile, tire width and ride height regardless of the car's clearance metrics.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
-REXCVAR_DEFINE_DOUBLE(fov_1p_scale, 1.0, "MCLA/Camera", "FOV scale — 1st person / cockpit (0.5 = narrower, 2.0 = wider)")
-    .range(0.5, 5.0)
-    .lifecycle(rex::cvar::Lifecycle::kHotReload);
-
-REXCVAR_DEFINE_DOUBLE(fov_3p_scale, 1.0, "MCLA/Camera", "FOV scale — 3rd person / chase cam (0.5 = narrower, 2.0 = wider)")
-    .range(0.5, 5.0)
-    .lifecycle(rex::cvar::Lifecycle::kHotReload);
-
-// BadassBaboon's Recomp Adjustments: Continuous exponential camera boom smoothing at 60 FPS
-REXCVAR_DEFINE_BOOL(smooth_chase_cam, true, "MCLA/Camera",
-    "Fix: Smooth chase camera boom interpolation at 60 FPS using continuous-time exponential decay.")
-    .lifecycle(rex::cvar::Lifecycle::kHotReload);
-
-REXCVAR_DEFINE_DOUBLE(chase_cam_smoothing_factor, 1.0, "MCLA/Camera",
-    "Chase camera boom smoothing factor multiplier (0.1 - 3.0).")
-    .range(0.1, 3.0)
-    .lifecycle(rex::cvar::Lifecycle::kHotReload);
-
 // BadassBaboon's Recomp Adjustments: Vehicle chassis suspension damping & ground depth continuous filter
 REXCVAR_DEFINE_BOOL(smooth_chassis_depth, true, "MCLA/Physics",
     "Fix: Smooth vehicle chassis suspension and ground depth damping at 60 FPS.")
-    .lifecycle(rex::cvar::Lifecycle::kHotReload);
-
-REXCVAR_DEFINE_STRING(debug_cam, "off", "MCLA/Camera",
-    "Free-fly camera during live gameplay: left stick moves, right stick looks, triggers change "
-    "speed. Gameplay keeps running underneath (drive, traffic, physics).")
-    .allowed({"off", "free"})
-    .lifecycle(rex::cvar::Lifecycle::kHotReload);
-
-REXCVAR_DEFINE_DOUBLE(debug_cam_speed, 40.0, "MCLA/Camera",
-    "Free-fly camera move speed (world units/second).")
-    .range(1.0, 500.0)
-    .lifecycle(rex::cvar::Lifecycle::kHotReload);
-
-REXCVAR_DEFINE_DOUBLE(debug_cam_sens, 2.5, "MCLA/Camera",
-    "Free-fly camera look sensitivity (radians/second at full stick).")
-    .range(0.2, 10.0)
-    .lifecycle(rex::cvar::Lifecycle::kHotReload);
-
-REXCVAR_DEFINE_BOOL(debug_cam_mouse, true, "MCLA/Camera",
-    "Free-fly camera: use the mouse to look (captures the cursor while active).")
-    .lifecycle(rex::cvar::Lifecycle::kHotReload);
-
-REXCVAR_DEFINE_DOUBLE(debug_cam_mouse_sens, 0.0025, "MCLA/Camera",
-    "Free-fly mouse look sensitivity (radians per mouse pixel).")
-    .range(0.0002, 0.02)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_BOOL(lzx_stats, false, "MCLA/Debug",
@@ -1318,209 +1275,6 @@ static void ApplyRubberBandLevel();
 static void ApplyRubberBandScales();
 static void DumpRubberBandTuning();
 
-// Free-fly camera host state (see Patch_DebugCam). Angles are seeded from the
-// camera on activation, then integrated from the right stick each frame. The
-// world position lives in guest memory at +0x50 and is read/written in place.
-static bool g_freecam_seeded = false;
-static float g_freecam_yaw = 0.0f;
-static float g_freecam_pitch = 0.0f;
-
-// Mouse-look for the free-fly camera. Self-contained OS mouse capture (Win32):
-// while active we hide + confine the cursor, recenter it every frame, and feed
-// the raw pixel delta into yaw/pitch as a displacement (no dt scaling — mouse
-// deltas are already per-frame). Independent of mnk_mode, so it does not hijack
-// the pad. Sign matches the right-stick path: mouse right = look right (yaw
-// down), mouse up = look up (pitch down). Caller clamps pitch afterward.
-#if defined(_WIN32)
-static bool g_freecam_mouse_captured = false;
-static void FreecamMouseUpdate(bool active, float& yaw, float& pitch) {
-    auto* win = rex::Runtime::instance()->display_window();
-    if (!win) return;
-    HWND hwnd = static_cast<HWND>(win->GetNativeWindowHandle());
-    if (!hwnd) return;
-
-    // Release the cursor whenever an ImGui overlay (F4 RexGlue Settings, console,
-    // etc.) wants the mouse, so the menu is usable; recapture once it is closed.
-    // Deterministic from the live overlay state — no key-toggle to drift out of
-    // sync with the menu. debug_cam_mouse is the master on/off.
-    bool menu_open = ImGui::GetCurrentContext() && ImGui::GetIO().WantCaptureMouse;
-    bool want = active && REXCVAR_GET(debug_cam_mouse) && !menu_open;
-
-    // Client-area center in screen coordinates (recenter target).
-    RECT rc;
-    GetClientRect(hwnd, &rc);
-    POINT center = {(rc.right - rc.left) / 2, (rc.bottom - rc.top) / 2};
-    ClientToScreen(hwnd, &center);
-
-    if (want && !g_freecam_mouse_captured) {
-        g_freecam_mouse_captured = true;
-        win->SetCursorVisibility(rex::ui::Window::CursorVisibility::kHidden);
-        win->CaptureMouse();
-        SetCursorPos(center.x, center.y);  // seed center, skip first-frame spike
-        return;
-    }
-    if (!want) {
-        if (g_freecam_mouse_captured) {
-            g_freecam_mouse_captured = false;
-            win->SetCursorVisibility(rex::ui::Window::CursorVisibility::kVisible);
-            win->ReleaseMouse();
-        }
-        return;
-    }
-
-    POINT cur;
-    GetCursorPos(&cur);
-    int dx = cur.x - center.x;
-    int dy = cur.y - center.y;
-    float s = static_cast<float>(REXCVAR_GET(debug_cam_mouse_sens));
-    yaw -= dx * s;
-    pitch += dy * s;
-    SetCursorPos(center.x, center.y);
-}
-#else
-static void FreecamMouseUpdate(bool, float&, float&) {}
-#endif
-
-// Normalize an XInput thumbstick axis (int16, -32768..32767, centered at 0) to
-// [-1, 1] with a small radial deadzone. XInput convention: up/right = positive.
-static float NormalizeStick(int16_t raw) {
-    float v = float(raw) / 32767.0f;
-    if (v > 1.0f) v = 1.0f;
-    if (v < -1.0f) v = -1.0f;
-    if (v < 0.15f && v > -0.15f) return 0.0f;
-    return v;
-}
-
-// Gate bypass so the free-fly camera runs during live gameplay. In sub_822C0320
-// the dcam manager block only executes when there is no gameplay camera source
-// (r29 == 0, menus) or the photo-mode-active byte is set; in normal gameplay it
-// is skipped, so Patch_DebugCam never fires. Hook at the gate compare
-// (0x822C0644); returning true jumps straight to the manager block
-// (0x822C065C), the same target as the gate-passed path (skipped instructions
-// are loads/compares only). Only bypasses when the free camera is requested, so
-// photo mode is untouched when debug_cam = off.
-bool Patch_DebugCamGate() {
-    return REXCVAR_GET(debug_cam) == "free";
-}
-
-// Free-fly camera driver. Hook at 0x822C0668: r3 = dcam manager (from
-// camsys+0x33C, already null-checked), right before the manager's per-frame
-// update (sub_82502E18) which in turn updates the active camera.
-//
-// The manager's active camera index (mgr+0, big-endian u32) selects slot
-// mgr+8+index*4; index 0 (mgr+8) is the free-fly camera — its update
-// (sub_82536288 -> sub_82537450) integrates position from velocity and rebuilds
-// its orientation matrix every frame from scalar angles, so driving those
-// scalars + position is enough to fly it. Camera object layout (offsets from
-// the object pointer):
-//   +0x3C float  yaw   (added to +0x38, which we keep 0)
-//   +0x40 float  pitch
-//   +0x50 vec4   velocity (added into position each frame; we zero it and set
-//                 position directly)
-//   +0x100 vec4  position [x, y, z, w]
-// The game rebuilds orientation as a yaw about +Y (sub_82202E38), i.e. Y is up.
-// We keep yaw/pitch/position in host state and drive them from the sticks.
-void Patch_DebugCam(PPCRegister& r3) {
-    auto* base = rex::Runtime::instance()->virtual_membase();
-    if (!base) return;
-
-    uint32_t mgr = static_cast<uint32_t>(r3.u64);
-
-    if (REXCVAR_GET(debug_cam) != "free") {
-        // Release: cut the blend back to the gameplay camera immediately.
-        if (ReadGuestF32(base, mgr + 860) > 0.0f) {
-            WriteGuestF32(base, mgr + 860, 0.0f);
-        }
-        g_freecam_seeded = false;
-        FreecamMouseUpdate(false, g_freecam_yaw, g_freecam_pitch);  // release cursor
-        return;
-    }
-
-    // Force the free-fly camera (index 0) active and fully blended in.
-    base[mgr + 0] = 0;
-    base[mgr + 1] = 0;
-    base[mgr + 2] = 0;
-    base[mgr + 3] = 0;
-    WriteGuestF32(base, mgr + 860, 1.0f);
-    // mgr+856 gates the per-frame camera update in sub_82502E18 (the call that
-    // rebuilds the orientation matrix at +0xD0 from our angles). It is 1 in the
-    // ctor but cleared outside photo mode, freezing the orientation. Force it on.
-    base[mgr + 856] = 1;
-
-    uint32_t cam = ReadGuestU32(base, mgr + 8);
-    if (!cam) return;
-
-    // Kill the camera's internal look input so the update (sub_82536288) does
-    // not overwrite our yaw at +0x3C from the (unfed) photo-mode input source.
-    WriteGuestU32(base, cam + 0x68, 0);
-
-    // Seed our angle state from the camera's current orientation on activation
-    // so the view does not jump. Position lives at +0x50 and is read fresh each
-    // frame (below), so it needs no host-side seed.
-    if (!g_freecam_seeded) {
-        g_freecam_yaw = ReadGuestF32(base, cam + 0x3C);
-        g_freecam_pitch = ReadGuestF32(base, cam + 0x40);
-        g_freecam_seeded = true;
-    }
-
-    float dt = ReadGuestF32(base, 0x827D755C);  // clock+0x5C: raw frame dt
-    if (dt <= 0.0f || dt > 0.25f) dt = 1.0f / 60.0f;
-
-    // Read the pad straight from the host input system (the guest ioPad globals
-    // are ambiguous). XInput axes: up/right positive, int16 range.
-    float lx = 0.0f, ly = 0.0f, rx = 0.0f, ry = 0.0f;
-    auto* isys = static_cast<rex::input::InputSystem*>(
-        rex::Runtime::instance()->input_system());
-    if (isys) {
-        rex::input::X_INPUT_STATE state{};
-        if (isys->GetState(0, &state) == 0) {
-            lx = NormalizeStick(state.gamepad.thumb_lx);
-            ly = -NormalizeStick(state.gamepad.thumb_ly);  // stick up = forward
-            rx = -NormalizeStick(state.gamepad.thumb_rx);  // stick right = look right
-            ry = -NormalizeStick(state.gamepad.thumb_ry);  // stick up = look up
-        }
-    }
-
-    float sens = static_cast<float>(REXCVAR_GET(debug_cam_sens));
-    float speed = static_cast<float>(REXCVAR_GET(debug_cam_speed));
-
-    // Look: integrate the right stick into yaw/pitch and write them back; the
-    // game rebuilds the orientation matrix (+0xD0) from these each frame.
-    g_freecam_yaw += rx * sens * dt;
-    g_freecam_pitch += ry * sens * dt;
-    // Add mouse look on top of the stick (displacement, no dt).
-    FreecamMouseUpdate(true, g_freecam_yaw, g_freecam_pitch);
-    if (g_freecam_pitch > 1.5f) g_freecam_pitch = 1.5f;
-    if (g_freecam_pitch < -1.5f) g_freecam_pitch = -1.5f;
-    WriteGuestF32(base, cam + 0x38, 0.0f);
-    WriteGuestF32(base, cam + 0x3C, g_freecam_yaw);
-    WriteGuestF32(base, cam + 0x40, g_freecam_pitch);
-
-    // Move: the world position is the vec3 at +0x50 (x, y=height, z). Read it
-    // fresh (so the native button controls LB/RB/LT/RT still add in), advance it
-    // along the view direction from the left stick, and write it back. Y is up
-    // (orientation is a yaw about Y).
-    float cy = std::cos(g_freecam_yaw), sy = std::sin(g_freecam_yaw);
-    float cp = std::cos(g_freecam_pitch), sp = std::sin(g_freecam_pitch);
-    float fwd_x = cp * sy, fwd_y = sp, fwd_z = cp * cy;  // forward (yaw+pitch)
-    float right_x = cy, right_z = -sy;                   // horizontal strafe
-    float step = speed * dt;
-
-    float px = ReadGuestF32(base, cam + 0x50);
-    float py = ReadGuestF32(base, cam + 0x54);
-    float pz = ReadGuestF32(base, cam + 0x58);
-    px += (fwd_x * ly + right_x * lx) * step;
-    py += (fwd_y * ly) * step;
-    pz += (fwd_z * ly + right_z * lx) * step;
-    WriteGuestF32(base, cam + 0x50, px);
-    WriteGuestF32(base, cam + 0x54, py);
-    WriteGuestF32(base, cam + 0x58, pz);
-
-    // Hand the pose to the menu-camera module so menu_cam_dump can emit the spot
-    // you are flying at (position + look direction) as a front-end camera line.
-    MenuCam_NoteFreecam(px, py, pz, g_freecam_yaw, g_freecam_pitch);
-}
-
 // Traffic (va_) vehicles turned into player cars: chassis-bound substitution.
 //
 // A vp_ vehicle's physics bound is a phBoundComposite (type 12) whose five children are
@@ -2165,14 +1919,6 @@ bool Patch_WheelFitBypass() {
     return REXCVAR_GET(unlock_wheel_fit);
 }
 
-void Patch_FOVScale(PPCRegister& f1, PPCRegister& r24) {
-    int cam_idx = static_cast<int>(r24.u64);
-    double scale = (cam_idx == 1) ? REXCVAR_GET(fov_1p_scale) : REXCVAR_GET(fov_3p_scale);
-    if (scale != 1.0) {
-        f1.f64 = f1.f64 * scale;
-    }
-}
-
 // Fires at 0x822C22EC, right after the clock update (sub_821BDA90). The delta
 // time itself is delivered at the clock source (MCLAFrameDelta /
 // MCLAUseRealDelta / MCLAFixedStepPath) rather than overwritten late in the
@@ -2222,62 +1968,6 @@ void Patch_BypassVehicleDLC(PPCRegister& r30) {
         // PortalRewardIdx (0x38) = -1 (0xFFFFFFFF)
         ptr[0x38] = 0xFF; ptr[0x39] = 0xFF; ptr[0x3A] = 0xFF; ptr[0x3B] = 0xFF;
     }
-}
-
-// BadassBaboon's Recomp Adjustments:
-// Continuous-time exponential decay for chase camera smoothing factors.
-// In sub_82320298 (mcPlayerCamera::Update):
-//   0x82320468 - f13 is the camera position chase/lag factor S1
-//   0x823204F4 - f0  is the camera look-at / orientation factor S2
-//
-// On 30 FPS console the engine multiplied the raw profile factor by 0.5 and stepped once per update:
-//   S(dt) = 1 - (1 - 0.5 * S_raw) ^ (30 * dt * scale)
-// The engine ALREADY halves this factor itself when the frame rate is under
-// 60, at 0x82320460:
-//
-//   82320454  cmpwi cr6, r11, 0x3C     ; r11 = round(1/dt), the frame rate
-//   8232045c  lfs   f13, 0xE0(r11)     ; f13 = the raw tune value
-//   82320460  bge   cr6, loc_82320468  ; >= 60 fps? leave it alone
-//   82320464  fmuls f13, f13, f30      ; else f13 = tune * 0.5
-//   82320468  <-- both camera hooks land here
-//
-// So the value arriving in the hook is the raw tune above 60 fps and half the
-// tune below it. Multiplying by 0.5 unconditionally therefore quartered the
-// factor whenever the measured rate dipped under 60, and doubled it back the
-// moment it recovered. Around the 60 fps boundary that flips every frame,
-// which is the camera jitter seen while drifting, sliding and doing donuts:
-// exactly the moments where the frame rate wobbles across the threshold.
-//
-// Halving only when the engine did not reproduces the console reference curve
-// continuously across the boundary.
-static bool EngineAlreadyHalvedCameraFactor(const uint8_t* base) {
-    const float fps = ReadGuestF32(base, kGuestFrameRate);
-    // fctiwz after the +/- 0.5 bias is round-half-away-from-zero.
-    const int fps_i = static_cast<int>(fps >= 0.0f ? fps + 0.5f : fps - 0.5f);
-    return fps_i < 60;
-}
-
-static void ApplyCameraSmoothing(PPCRegister& reg) {
-    if (!REXCVAR_GET(smooth_chase_cam)) return;
-
-    auto* base = rex::Runtime::instance()->virtual_membase();
-    if (!base) return;
-
-    const float dt = ReadGuestF32(base, kGuestFrameDelta);
-    const double raw_k = reg.f64;
-    if (raw_k <= 0.0 || raw_k >= 1.0 || dt <= 0.0f) return;
-
-    const double k30 = EngineAlreadyHalvedCameraFactor(base) ? raw_k : 0.5 * raw_k;
-    const double scale = REXCVAR_GET(chase_cam_smoothing_factor);
-    reg.f64 = 1.0 - std::pow(1.0 - k30, static_cast<double>(dt) * 30.0 * scale);
-}
-
-void MCLACameraPosSmoothing(PPCRegister& f13) {
-    ApplyCameraSmoothing(f13);
-}
-
-void MCLACameraLookAtSmoothing(PPCRegister& f0) {
-    ApplyCameraSmoothing(f0);
 }
 
 // BadassBaboon's Recomp Adjustments: Vehicle chassis suspension damping & ground depth filter continuous-time scaling
@@ -2721,20 +2411,15 @@ void DumpVinylShapes() {}
 void RequestVinylShapeCapture() {}
 void TickVinylShapeCapture() {}
 void InitHooks() {}
-bool Patch_DebugCamGate() { return false; }
-void Patch_DebugCam(PPCRegister& r3) {}
 bool Patch_PhysicsCollision() { return false; }
 bool Patch_DisableRubberBanding() { return false; }
 void Patch_RideHeightFit(PPCRegister& f30) {}
 bool Patch_WheelFitBypass() { return false; }
-void Patch_FOVScale(PPCRegister& f1, PPCRegister& r24) {}
 void Patch_DeltaTimePre() {}
 void Patch_BypassVehicleDLC(PPCRegister& r30) {}
 void Hook_CaptureDistrict(PPCRegister& r3) {}
 void Hook_LzxDecompressPre(PPCRegister& r1) {}
 void Hook_LzxDecompressPost(PPCRegister& r1, PPCRegister& r3) {}
-void MCLACameraPosSmoothing(PPCRegister& f13) {}
-void MCLACameraLookAtSmoothing(PPCRegister& f0) {}
 void MCLAChassisDepthSmoothing(PPCRegister& f0) {}
 void MCLA_TrafficChassisBound_8232D048(PPCRegister& r9, PPCRegister& r11) {}
 void MCLA_TrafficChassisBound_8232D900(PPCRegister& r3, PPCRegister& r11) {}
