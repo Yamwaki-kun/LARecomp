@@ -14,7 +14,7 @@ void Patch_DofComposite(PPCRegister& r3);
 void Patch_ScaleTrafficLOD(PPCRegister& f0);
 
 // Removes ride height from the wheel-fit validator sub_82392F68 so the shop can
-// reach the full stock table (rh+300 .. rh_800, i.e. +3 .. -8). See hooks.cpp.
+// reach the full stock table (rh+300 .. rh_800, i.e. +3 .. -8). See vehicle.cpp.
 void Patch_RideHeightFit(PPCRegister& f30);
 
 // Skips the whole sub_82392F68 fit test, unlocking every stock rim size, tire
@@ -83,7 +83,7 @@ void MCLAChassisDepthSmoothing(PPCRegister& f0);
 void MCLAAmbientDensityTuning(PPCRegister& r3);
 
 // Traffic (va_) vehicles used as player cars: the chassis-bound substitution. See
-// hooks.cpp for the full story; the register pairs are (root-carrying reg, child reg).
+// vehicle.cpp for the full story; the register pairs are (root-carrying reg, child reg).
 void MCLA_TrafficChassisBound_8232D048(PPCRegister& r9, PPCRegister& r11);
 void MCLA_TrafficChassisBound_8232D900(PPCRegister& r3, PPCRegister& r11);
 void MCLA_TrafficChassisBound_8232E274(PPCRegister& r3, PPCRegister& r31);
