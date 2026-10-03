@@ -48,6 +48,7 @@
 #include "imgui.h"
 #include "../logging.h"
 #include "hooks.h"
+#include "hooks_internal.h"
 #include "discord_rpc/discord_rpc.h"
 #include "../graphics_button.h"
 #include "larecomp_log.h"
@@ -1633,8 +1634,6 @@ static bool SetDebugOptionValue(uint32_t value_addr, const std::string& value) {
 // Patch_DevOptionRegistered, hooked on that blr with r3 still holding the node.
 // That is after the game has finished building the node and before any consumer
 // can read it, for every option, which is the only point where both hold.
-static uint32_t ReadGuestU32(const uint8_t* base, uint32_t addr);
-static void WriteGuestU32(uint8_t* base, uint32_t addr, uint32_t val);
 
 struct PendingDebugOption {
     uint32_t value_addr;  // node+4
@@ -2075,8 +2074,6 @@ bool Patch_FenceSpinThrottle() {
     return true;
 }
 
-static float ReadGuestF32(const uint8_t* base, uint32_t addr);
-static void WriteGuestF32(uint8_t* base, uint32_t addr, float val);
 static void ApplyAmbientDensityTuning();
 static void ApplyFragTuneOverrides();
 static void ApplyRenderPhaseMask();
@@ -2151,18 +2148,6 @@ static void FreecamMouseUpdate(bool active, float& yaw, float& pitch) {
 #else
 static void FreecamMouseUpdate(bool, float&, float&) {}
 #endif
-
-static uint32_t ReadGuestU32(const uint8_t* base, uint32_t addr) {
-    return (uint32_t(base[addr + 0]) << 24) | (uint32_t(base[addr + 1]) << 16) |
-           (uint32_t(base[addr + 2]) << 8) | uint32_t(base[addr + 3]);
-}
-
-static void WriteGuestU32(uint8_t* base, uint32_t addr, uint32_t val) {
-    base[addr + 0] = (val >> 24) & 0xFF;
-    base[addr + 1] = (val >> 16) & 0xFF;
-    base[addr + 2] = (val >> 8) & 0xFF;
-    base[addr + 3] = val & 0xFF;
-}
 
 // Normalize an XInput thumbstick axis (int16, -32768..32767, centered at 0) to
 // [-1, 1] with a small radial deadzone. XInput convention: up/right = positive.
@@ -3230,23 +3215,6 @@ void Hook_SwfContextEnter(PPCRegister& r3) {
     g_swf_ctx[slot].value = want;
 }
 
-static float ReadGuestF32(const uint8_t* base, uint32_t addr) {
-    uint32_t be = (uint32_t(base[addr + 0]) << 24) | (uint32_t(base[addr + 1]) << 16) |
-                  (uint32_t(base[addr + 2]) << 8) | uint32_t(base[addr + 3]);
-    float val;
-    std::memcpy(&val, &be, sizeof(float));
-    return val;
-}
-
-static void WriteGuestF32(uint8_t* base, uint32_t addr, float val) {
-    uint32_t be;
-    std::memcpy(&be, &val, sizeof(float));
-    base[addr + 0] = (be >> 24) & 0xFF;
-    base[addr + 1] = (be >> 16) & 0xFF;
-    base[addr + 2] = (be >> 8) & 0xFF;
-    base[addr + 3] = be & 0xFF;
-}
-
 void UpdateCityLODMemory() {
     auto* base = rex::Runtime::instance()->virtual_membase();
     if (!base) return;
@@ -3363,22 +3331,6 @@ static void EnforceFrameLimit() {
 //
 // Accumulates into counters and touches the filesystem at most once per
 // second, never from inside a frame that is already late.
-//
-// The guest timer object is at 0x827D7500, so its struct offsets map onto
-// absolute addresses. [r3+8] is the published frame delta, already used by the
-// camera and chassis hooks.
-constexpr uint32_t kGuestFrameDelta  = 0x827D7508;  // [r3+8]
-constexpr uint32_t kGuestFrameRate   = 0x827D750C;  // [r3+12]
-constexpr uint32_t kGuestAccumA      = 0x827D7514;  // [r3+20]
-constexpr uint32_t kGuestAccumB      = 0x827D7518;  // [r3+24]
-constexpr uint32_t kGuestTimeScale   = 0x827D7554;  // [r3+84]
-// The guest's OWN delta clamp, applied by the fsel pairs at 0x821BDC78 and
-// 0x821BDC88 at the end of sub_821BDA90: [r3+40] is a floor and [r3+36] a
-// ceiling on both [r3+8] and [r3+88]. An engine_dt pinned to exactly the
-// ceiling means real frames are at or past it - a symptom of slow frames, not
-// a cause. Logged so that is visible rather than inferred.
-constexpr uint32_t kGuestDtMax      = 0x827D7524;  // [r3+36]
-constexpr uint32_t kGuestDtMin      = 0x827D7528;  // [r3+40]
 
 // 1 ms buckets; the last bucket is everything at or above it.
 constexpr int kHistBuckets = 121;
