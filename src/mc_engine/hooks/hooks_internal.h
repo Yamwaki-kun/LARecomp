@@ -76,6 +76,11 @@ void StartFreezeWatchdog();
 void ApplyAmbientDensityTuning();
 void ApplyFragTuneOverrides();
 
+// rubberband.cpp
+void ApplyRubberBandLevel();
+void ApplyRubberBandScales();
+void DumpRubberBandTuning();
+
 // frame_timing.cpp: the spin counters the timing log reports.
 extern std::atomic<uint64_t> g_fence_hook_calls;
 extern std::atomic<uint64_t> g_fence_switches;
