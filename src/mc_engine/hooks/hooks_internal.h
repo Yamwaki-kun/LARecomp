@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <string>
 #include <string_view>
 
 // Guest memory is big-endian; these read and write it straight off the membase.
@@ -60,6 +61,12 @@ constexpr uint32_t kGuestDtMin      = 0x827D7528;  // [r3+40]
 
 // graphics.cpp
 void ApplyAspectRatioPatch(std::string_view ratio);
+
+// vinyl.cpp
+void ApplyVinylLayerCaps();
+void TickVinylReadbackWindow();
+void ExportVinyl();
+void ImportVinyl(const std::string& name_in);
 
 // dev_options.cpp
 void ApplyDebugOptions();

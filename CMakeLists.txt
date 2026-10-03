@@ -36,6 +36,7 @@ set(LARECOMP_SOURCES
     src/mc_engine/hooks/camera.cpp
     src/mc_engine/hooks/vehicle.cpp
     src/mc_engine/hooks/rubberband.cpp
+    src/mc_engine/hooks/vinyl.cpp
     src/mc_engine/guest_profiler.cpp
     src/mc_engine/carbon_parts.cpp
     src/mc_engine/graphics_button.cpp
