@@ -66,3 +66,16 @@ void StartFreezeWatchdog();
 // world_tuning.cpp
 void ApplyAmbientDensityTuning();
 void ApplyFragTuneOverrides();
+
+// frame_timing.cpp: the spin counters the timing log reports.
+extern std::atomic<uint64_t> g_fence_hook_calls;
+extern std::atomic<uint64_t> g_fence_switches;
+extern std::atomic<uint64_t> g_fence_switch_us;
+extern std::atomic<uint64_t> g_limiter_spin_us;
+extern std::atomic<uint64_t> g_limiter_spins;
+
+// hooks.cpp: the timing log
+bool TimingLogEnabled();
+void RecordFrameTime();
+extern std::atomic<int32_t> g_substep_last;
+extern std::atomic<uint64_t> g_fixedstep_hits;
