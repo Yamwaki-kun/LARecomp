@@ -7,6 +7,7 @@
 // Patch_DeltaTimePre() in hooks.cpp calling into the rest.
 //
 
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 
@@ -55,6 +56,12 @@ constexpr uint32_t kGuestTimeScale   = 0x827D7554;  // [r3+84]
 // a cause. Logged so that is visible rather than inferred.
 constexpr uint32_t kGuestDtMax      = 0x827D7524;  // [r3+36]
 constexpr uint32_t kGuestDtMin      = 0x827D7528;  // [r3+40]
+
+// render_phases.cpp
+extern std::atomic<uint64_t> g_frame_heartbeat;  // bumped by Patch_DeltaTimePre
+void ApplyRenderPhaseMask();
+void LogRenderPhaseMaskOnce();
+void StartFreezeWatchdog();
 
 // world_tuning.cpp
 void ApplyAmbientDensityTuning();
