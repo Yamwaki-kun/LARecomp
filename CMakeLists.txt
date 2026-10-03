@@ -27,6 +27,7 @@ set(LARECOMP_SOURCES
     src/mc_engine/threading.cpp
     src/mc_engine/hooks/hooks.cpp
     src/mc_engine/hooks/ui.cpp
+    src/mc_engine/hooks/world_tuning.cpp
     src/mc_engine/guest_profiler.cpp
     src/mc_engine/carbon_parts.cpp
     src/mc_engine/graphics_button.cpp

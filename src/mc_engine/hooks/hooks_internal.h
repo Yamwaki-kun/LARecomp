@@ -55,3 +55,7 @@ constexpr uint32_t kGuestTimeScale   = 0x827D7554;  // [r3+84]
 // a cause. Logged so that is visible rather than inferred.
 constexpr uint32_t kGuestDtMax      = 0x827D7524;  // [r3+36]
 constexpr uint32_t kGuestDtMin      = 0x827D7528;  // [r3+40]
+
+// world_tuning.cpp
+void ApplyAmbientDensityTuning();
+void ApplyFragTuneOverrides();
