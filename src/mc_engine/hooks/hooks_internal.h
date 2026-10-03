@@ -61,6 +61,11 @@ constexpr uint32_t kGuestDtMin      = 0x827D7528;  // [r3+40]
 // graphics.cpp
 void ApplyAspectRatioPatch(std::string_view ratio);
 
+// dev_options.cpp
+void ApplyDebugOptions();
+void ApplyPerfDebugOptions();
+void ApplyLoadTimeDevOptions();
+
 // render_phases.cpp
 extern std::atomic<uint64_t> g_frame_heartbeat;  // bumped by Patch_DeltaTimePre
 void ApplyRenderPhaseMask();

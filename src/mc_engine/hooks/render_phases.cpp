@@ -19,9 +19,9 @@
 #include "larecomp_log.h"
 
 // ── Render phase culling ────────────────────────────────────────────────────
-// These reactivate the game's own dev command-line switches (see the debug
-// option block in hooks.cpp). They are not new code paths: the retail renderer
-// still contains every branch, only the switch that reaches it was stripped.
+// These reactivate the game's own dev command-line switches (see
+// dev_options.cpp). They are not new code paths: the retail renderer still
+// contains every branch, only the switch that reaches it was stripped.
 //
 // perf_no_shadows is the big one. sub_822E47E0 (the renderer ctor) reacts to it
 // with `phase_mask &= 0xFFFF9E1F`, clearing render phase bits 0x20 0x40 0x80
