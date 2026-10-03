@@ -32,10 +32,13 @@
 // term in every shader reads whatever texture happens to sit at descriptor 0.
 // ===========================================================================
 
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <map>
+#include <mutex>
+#include <utility>
 #include <vector>
 
 #include <rex/ui/d3d12/d3d12_api.h>
@@ -166,9 +169,23 @@ class RenderTargetPool : public RenderTargetLookup {
     // (resolved_spares_) instead of allocating, and variants dropped for room.
     uint64_t resolve_variant_reuses = 0;
     uint64_t resolve_variants_evicted = 0;
+    // Resolve destinations the CPU wrote after their resolve, and the lookups
+    // answered from guest memory because of it instead of the GPU copy.
+    uint64_t cpu_overwrites = 0;
+    uint64_t cpu_overwrite_skips = 0;
   };
 
   void Shutdown(D3D12Context& context);
+
+  // A resolve destination the guest CPU writes afterwards holds the CPU's data
+  // from then on -- on the console memory is shared, so the next fetch reads
+  // what the CPU left there. MCLA does this on purpose: the photo preview
+  // texture lives at 0x06ACD000, the memory the motion blur's depth resolve
+  // uses every frame, and the bridge kept handing the UI that depth copy.
+  // These register the SDK's physical write watch for the destinations, so
+  // such a write turns the GPU copy off until the next resolve there.
+  bool StartWatchingCpuWrites();
+  void StopWatchingCpuWrites();
 
   // Returns the target for this configuration, creating it on first use.
   // Never null unless creation fails.
@@ -269,7 +286,8 @@ class RenderTargetPool : public RenderTargetLookup {
 
   // True when an 8:8:8:8 colour copy of exactly this extent exists at the
   // address and guest memory does not hold it yet -- i.e. a CPU lock there
-  // needs ReadbackResolvedColor. No GPU work.
+  // needs ReadbackResolvedColor. False when the CPU wrote the memory after the
+  // resolve: then guest memory is the newer image. No GPU work.
   bool NeedsGuestWriteBack(uint32_t dest_address, uint32_t width, uint32_t height);
 
   // RenderTargetLookup.
@@ -299,8 +317,11 @@ class RenderTargetPool : public RenderTargetLookup {
                          uint32_t height) const override;
 
   // Records that the guest resolved to this address, whether or not we can
-  // produce the contents yet.
-  void NoteDestination(uint32_t dest_address, uint32_t width, uint32_t height);
+  // produce the contents yet. `bytes` is the guest memory the destination
+  // covers (tile-padded); it is what the CPU-write watch protects. A resolve
+  // ends any CPU overwrite: the GPU copy is the newer image again.
+  void NoteDestination(uint32_t dest_address, uint32_t width, uint32_t height,
+                       uint32_t bytes);
 
   // Arms the clear a CLEAR-ONLY pass needs: the guest cleared this surface and
   // resolved it without issuing a single draw, so the pool's usual policy clear
@@ -417,8 +438,30 @@ class RenderTargetPool : public RenderTargetLookup {
   struct ProducedExtent {
     uint32_t width = 0;
     uint32_t height = 0;
+    // Guest bytes the resolve covers (tile-padded), the range the CPU-write
+    // watch protects. 0 until a resolve has said how big it is.
+    uint32_t bytes = 0;
+    // The write watch is armed over `bytes` and no write has hit it since.
+    bool watched = false;
+    // The CPU wrote here after the last resolve, so guest memory -- not the
+    // GPU copy -- holds the current image until the guest resolves here again.
+    bool cpu_dirty = false;
   };
   std::map<uint32_t, ProducedExtent> gpu_produced_;
+
+  // CPU writes to resolve destinations, reported by the SDK's physical write
+  // watch on whatever guest thread wrote, and applied on the render thread.
+  static std::pair<uint32_t, uint32_t> CpuWriteThunk(void* context_ptr,
+                                                     uint32_t physical_address_start,
+                                                     uint32_t length, bool exact_range);
+  // Marks every destination a queued write overlaps. Render thread only.
+  void ApplyCpuWrites();
+  bool CpuOverwrote(uint32_t guest_address) const;
+  void* cpu_watch_handle_ = nullptr;
+  std::mutex cpu_write_mutex_;
+  std::vector<std::pair<uint32_t, uint32_t>> cpu_writes_;
+  bool cpu_write_overflow_ = false;  // under cpu_write_mutex_
+  std::atomic<bool> cpu_write_pending_{false};
   std::map<uint32_t, ResolvedCopy> resolved_;  // keyed by guest destination address
   std::vector<RenderTarget*> pending_to_shader_;
   // Depth copies still to be issued; a resolve must not submit work.

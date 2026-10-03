@@ -12,6 +12,8 @@
 #include <vector>
 
 #include <rex/logging.h>
+#include <rex/runtime.h>
+#include <rex/system/xmemory.h>
 #include <rex/ui/d3d12/d3d12_util.h>
 
 #include "context.h"
@@ -31,6 +33,7 @@ REXCVAR_DECLARE(bool, mcla_native_gfx_depth_reclear_infer);
 REXCVAR_DECLARE(bool, mcla_native_gfx_reclear_probe);
 REXCVAR_DECLARE(bool, mcla_native_gfx_diag);
 REXCVAR_DECLARE(bool, mcla_native_gfx_resolve_variants);
+REXCVAR_DECLARE(bool, mcla_native_gfx_resolve_cpu_writes);
 
 namespace mcla::native_gfx {
 
@@ -323,6 +326,7 @@ bool RenderTargetKey::operator<(const RenderTargetKey& o) const {
 }
 
 void RenderTargetPool::Shutdown(D3D12Context& context) {
+  StopWatchingCpuWrites();
   for (auto& [key, t] : targets_) {
     if (t.color) context.DeferRelease(t.color.Detach());
     if (t.color1) context.DeferRelease(t.color1.Detach());
@@ -439,8 +443,9 @@ bool RenderTargetPool::IsGpuProduced(uint32_t guest_address, uint32_t width,
   }
   // The extent has to match what was resolved there. Without this the test is
   // just "this address was once a resolve destination", which stays true after
-  // the guest reuses the memory for something else.
-  return it->second.width == width && it->second.height == height;
+  // the guest reuses the memory for something else. And a destination the CPU
+  // has written since holds the CPU's data, which decoding guest memory gets.
+  return it->second.width == width && it->second.height == height && !it->second.cpu_dirty;
 }
 
 bool RenderTargetPool::IsStaleGpuAddress(uint32_t guest_address, uint32_t width,
@@ -451,10 +456,130 @@ bool RenderTargetPool::IsStaleGpuAddress(uint32_t guest_address, uint32_t width,
 }
 
 void RenderTargetPool::NoteDestination(uint32_t dest_address, uint32_t width,
-                                       uint32_t height) {
-  if (dest_address && width && height) {
-    gpu_produced_[dest_address & 0x1FFFFFFFu] = ProducedExtent{width, height};
+                                       uint32_t height, uint32_t bytes) {
+  if (!dest_address || !width || !height) {
+    return;
   }
+  // A CPU write reported before this resolve belongs to the image this resolve
+  // replaces; applied after it, it would turn the fresh copy off.
+  ApplyCpuWrites();
+  const uint32_t address = dest_address & 0x1FFFFFFFu;
+  ProducedExtent& e = gpu_produced_[address];
+  e.width = width;
+  e.height = height;
+  if (bytes) {
+    e.bytes = bytes;
+  }
+  e.cpu_dirty = false;
+  // Armed once and left armed: a destination nobody writes costs nothing per
+  // frame. Only a write disarms it (the SDK unprotects the written pages), and
+  // then the next resolve here arms it again.
+  if (cpu_watch_handle_ && !e.watched && e.bytes &&
+      REXCVAR_GET(mcla_native_gfx_resolve_cpu_writes)) {
+    if (auto* memory = rex::Runtime::instance() ? rex::Runtime::instance()->memory() : nullptr) {
+      memory->EnablePhysicalMemoryAccessCallbacks(address, e.bytes,
+                                                  /*enable_invalidation_notifications=*/true,
+                                                  /*enable_data_providers=*/false);
+      e.watched = true;
+    }
+  }
+}
+
+bool RenderTargetPool::StartWatchingCpuWrites() {
+  if (cpu_watch_handle_) {
+    return true;
+  }
+  auto* memory = rex::Runtime::instance() ? rex::Runtime::instance()->memory() : nullptr;
+  if (!memory) {
+    return false;
+  }
+  cpu_watch_handle_ = memory->RegisterPhysicalMemoryInvalidationCallback(CpuWriteThunk, this);
+  return cpu_watch_handle_ != nullptr;
+}
+
+void RenderTargetPool::StopWatchingCpuWrites() {
+  if (!cpu_watch_handle_) {
+    return;
+  }
+  if (auto* memory = rex::Runtime::instance() ? rex::Runtime::instance()->memory() : nullptr) {
+    memory->UnregisterPhysicalMemoryInvalidationCallback(cpu_watch_handle_);
+  }
+  cpu_watch_handle_ = nullptr;
+}
+
+// Runs on the guest thread that wrote, inside the SDK's fault handler with its
+// global lock held: queue and return, nothing else. Every registered callback
+// sees every watched page, the texture cache's included, and the SDK unwatches
+// the INTERSECTION of the ranges the callbacks return -- so returning exactly
+// the range reported, as the texture cache does, changes nothing for it.
+std::pair<uint32_t, uint32_t> RenderTargetPool::CpuWriteThunk(void* context_ptr,
+                                                             uint32_t physical_address_start,
+                                                             uint32_t length, bool exact_range) {
+  (void)exact_range;
+  auto* self = static_cast<RenderTargetPool*>(context_ptr);
+  if (self && length) {
+    std::lock_guard<std::mutex> lock(self->cpu_write_mutex_);
+    // Drained once per draw; a queue this deep means nothing is drawing.
+    // Overflow is not dropped silently: it marks every destination written.
+    constexpr size_t kMaxQueued = 65536;
+    if (self->cpu_writes_.size() < kMaxQueued) {
+      self->cpu_writes_.emplace_back(physical_address_start, length);
+    } else {
+      self->cpu_write_overflow_ = true;
+    }
+    self->cpu_write_pending_.store(true, std::memory_order_release);
+  }
+  return std::make_pair(physical_address_start, length);
+}
+
+void RenderTargetPool::ApplyCpuWrites() {
+  if (!cpu_write_pending_.load(std::memory_order_acquire)) {
+    return;
+  }
+  std::vector<std::pair<uint32_t, uint32_t>> writes;
+  bool overflow = false;
+  {
+    std::lock_guard<std::mutex> lock(cpu_write_mutex_);
+    writes.swap(cpu_writes_);
+    overflow = cpu_write_overflow_;
+    cpu_write_overflow_ = false;
+    cpu_write_pending_.store(false, std::memory_order_relaxed);
+  }
+  if (!REXCVAR_GET(mcla_native_gfx_resolve_cpu_writes)) {
+    return;
+  }
+  for (auto& [address, e] : gpu_produced_) {
+    if (!e.bytes) {
+      continue;
+    }
+    bool hit = overflow;
+    for (size_t i = 0; i < writes.size() && !hit; ++i) {
+      const uint64_t w_start = writes[i].first;
+      const uint64_t w_end = w_start + writes[i].second;
+      hit = w_start < uint64_t(address) + e.bytes && uint64_t(address) < w_end;
+    }
+    if (hit) {
+      if (!e.cpu_dirty) {
+        ++stats_.cpu_overwrites;
+        // Expected to be rare (the photo flow), so each one is worth a line;
+        // the cap keeps a destination the CPU rewrites every frame from
+        // flooding the log, and the count says if that is happening.
+        const uint64_t n = stats_.cpu_overwrites;
+        if (n <= 32u || (n % 256u) == 0u) {
+          REXLOG_INFO("[native_gfx] CPU wrote over resolve destination {:#010x} ({}x{}, {} bytes)"
+                      " -- fetches decode guest memory until the next resolve there (#{}{})",
+                      address, e.width, e.height, e.bytes, n, overflow ? ", queue overflow" : "");
+        }
+      }
+      e.cpu_dirty = true;
+      e.watched = false;  // the written pages are unprotected now
+    }
+  }
+}
+
+bool RenderTargetPool::CpuOverwrote(uint32_t guest_address) const {
+  auto it = gpu_produced_.find(guest_address & 0x1FFFFFFFu);
+  return it != gpu_produced_.end() && it->second.cpu_dirty;
 }
 
 void RenderTargetPool::LogTargetsForFormat(uint32_t rt_format, const char* why) {
@@ -1384,6 +1509,13 @@ ID3D12Resource* RenderTargetPool::FindResolvedDepthAs8888(uint32_t guest_address
   if (it == resolved_.end() || !it->second.from_depth || !it->second.packed8888) {
     return nullptr;
   }
+  // The photo preview is exactly this case: a CPU-written k_8_8_8_8 texture at
+  // 0x06ACD000, the motion blur's depth-as-colour address, was handed the
+  // depth copy -- a near-black image with the scene's silhouette.
+  if (CpuOverwrote(guest_address)) {
+    ++stats_.cpu_overwrite_skips;
+    return nullptr;
+  }
   // Same superset rule as FindResolvedTarget: a smaller fetch over a larger
   // resolve is the guest reading a sub-rect, a larger one is a different
   // resource that happens to share the address.
@@ -1399,6 +1531,9 @@ ID3D12Resource* RenderTargetPool::FindResolvedDepthAs8888(uint32_t guest_address
 
 void RenderTargetPool::FlushPendingCopies(D3D12Context& context,
                                           ID3D12GraphicsCommandList* cl) {
+  // Every draw comes through here before its textures are bound, so this is
+  // where CPU writes reported since the last draw take effect.
+  ApplyCpuWrites();
   // Drain resolve destinations retired by NoteResolve (format/size reuse) even
   // if there is nothing to copy this call; DeferRelease is fence-gated so this
   // is safe against in-flight command lists and keeps VRAM bounded.
@@ -2077,6 +2212,12 @@ RenderTargetPool::ResolvedCopy* RenderTargetPool::FindCpuReadableCopy(uint32_t d
 
 bool RenderTargetPool::NeedsGuestWriteBack(uint32_t dest_address, uint32_t width,
                                            uint32_t height) {
+  // The CPU wrote here after the resolve: what guest memory holds is newer than
+  // the copy, and writing the copy back would destroy it.
+  ApplyCpuWrites();
+  if (CpuOverwrote(dest_address)) {
+    return false;
+  }
   const ResolvedCopy* copy = FindCpuReadableCopy(dest_address, width, height, nullptr);
   return copy && !copy->guest_current;
 }
@@ -2197,6 +2338,11 @@ ID3D12Resource* RenderTargetPool::FindResolvedTarget(uint32_t guest_address, uin
   if (it == resolved_.end()) {
     ++stats_.lookup_misses;
     ++stats_.miss_no_entry;
+    return nullptr;
+  }
+  // Written by the CPU since the resolve: guest memory is the current image.
+  if (CpuOverwrote(guest_address)) {
+    ++stats_.cpu_overwrite_skips;
     return nullptr;
   }
   if (!it->second.resource) {

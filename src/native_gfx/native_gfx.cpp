@@ -151,6 +151,16 @@ REXCVAR_DEFINE_BOOL(
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_BOOL(
+    mcla_native_gfx_resolve_cpu_writes, true, "MCLA/NativeGfx",
+    "Fix: the photo preview (and anything else the CPU writes over a resolve destination) shows "
+    "an old GPU image. MCLA puts the photo preview texture at 0x06ACD000, the memory the motion "
+    "blur's depth resolve uses, and the render-target bridge kept answering that address with "
+    "the depth copy -- a near-black picture with the scene's outline. With this on, the SDK's "
+    "write watch covers every resolve destination, and a CPU write there makes fetches decode "
+    "guest memory until the guest resolves to it again. Off for A/B.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_BOOL(
     mcla_native_gfx_lock_writeback_dump, false, "MCLA/NativeGfx",
     "TEMP DIAG for mcla_native_gfx_lock_writeback: after each write-back, read the guest memory "
     "back the way the photo grab does (untile, swap every dword, bytes 1..3 as R,G,B) and write "
@@ -1141,6 +1151,10 @@ static bool EnsureDrawReady() {
   // streaming in stayed half-decoded forever, which is the grid of black
   // squares on the map screen.
   g_textures.StartWatchingGuestWrites();
+  // And the other direction of the bridge: a resolve destination the CPU
+  // writes afterwards (the photo preview over the depth-as-colour address)
+  // has to stop being answered with the GPU copy.
+  g_render_targets.StartWatchingCpuWrites();
   if (failed) {
     REXLOG_ERROR("[native_gfx] first-draw initialization failed at: {}", failed);
     g_draw_init_failed = true;
@@ -1522,7 +1536,26 @@ void NotifyResolve(const uint8_t* base, uint32_t dev, uint32_t flags, uint32_t d
   // the address and never produced a resource, so the object sampling it lost
   // its texture entirely instead of decoding guest memory. Bridge when we can,
   // decode when we cannot, and never claim ownership of an image we do not have.
-  g_render_targets.NoteDestination(dest, fetch.width, fetch.height);
+  //
+  // The span is the guest memory the destination covers -- tiled surfaces are
+  // padded to 32x32-block tiles, 0x398000 bytes for a 1280x720 k_8_8_8_8 -- and
+  // it is what the CPU-write watch protects. It must not be rounded up: a
+  // watched page past the end would let a write to the NEXT allocation turn
+  // this destination's copy off.
+  uint32_t dest_bytes = 0;
+  {
+    const FormatInfo fi = GetFormatInfo(fetch.format);
+    if (fi.bytes_per_block && fi.block_width && fi.block_height) {
+      const uint32_t bw = (fetch.width + fi.block_width - 1) / fi.block_width;
+      const uint32_t bh = (fetch.height + fi.block_height - 1) / fi.block_height;
+      const uint32_t pitch_blocks = fetch.pitch ? fetch.pitch / fi.block_width : bw;
+      const uint64_t span = fetch.tiled
+                                ? uint64_t(AlignToTile(bw)) * AlignToTile(bh) * fi.bytes_per_block
+                                : uint64_t(pitch_blocks) * bh * fi.bytes_per_block;
+      dest_bytes = span <= 0x20000000ull ? uint32_t(span) : 0u;
+    }
+  }
+  g_render_targets.NoteDestination(dest, fetch.width, fetch.height, dest_bytes);
 }
 
 void NoteGuestDraw(int kind) { NoteFrameCaptureGuestDraw(kind); }
