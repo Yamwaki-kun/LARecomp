@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <string_view>
 
 // Guest memory is big-endian; these read and write it straight off the membase.
 inline uint32_t ReadGuestU32(const uint8_t* base, uint32_t addr) {
@@ -56,6 +57,9 @@ constexpr uint32_t kGuestTimeScale   = 0x827D7554;  // [r3+84]
 // a cause. Logged so that is visible rather than inferred.
 constexpr uint32_t kGuestDtMax      = 0x827D7524;  // [r3+36]
 constexpr uint32_t kGuestDtMin      = 0x827D7528;  // [r3+40]
+
+// graphics.cpp
+void ApplyAspectRatioPatch(std::string_view ratio);
 
 // render_phases.cpp
 extern std::atomic<uint64_t> g_frame_heartbeat;  // bumped by Patch_DeltaTimePre
