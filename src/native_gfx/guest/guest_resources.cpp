@@ -67,8 +67,19 @@ bool IsPhysicalRangeReadable(uint32_t physical_address, uint64_t size) {
   // in the 0xE0 one. Checking a single alias produces false negatives —
   // observed with a vertex buffer at 0x0C3D4000 that the game was actively
   // rendering from while the 0xE0 alias reported it unmapped.
-  static constexpr uint32_t kPhysicalAliases[] = {0xE0000000u, 0xC0000000u, 0xA0000000u};
-  for (uint32_t aliasBase : kPhysicalAliases) {
+  //
+  // The 0xE0 alias is also one page off: virtual 0xE0000000 + v is physical
+  // v + 0x1000 (PhysicalHeap::GetPhysicalAddress), the same page the guest's
+  // own resolve adds (sub_82420BA8). Checking `0xE0000000 | phys` therefore
+  // looked one page too high, and a surface whose next page belongs to no
+  // allocation read as unmapped: the second front buffer (0x08378000, virtual
+  // 0xE8377000) refused its photo write-back, and a 128x72 album thumbnail
+  // right after a photo fell back to the neutral texture.
+  if (phys >= 0x1000u && IsGuestRangeReadable(0xE0000000u + (phys - 0x1000u), size)) {
+    return true;
+  }
+  static constexpr uint32_t kOffsetFreeAliases[] = {0xC0000000u, 0xA0000000u};
+  for (uint32_t aliasBase : kOffsetFreeAliases) {
     if (IsGuestRangeReadable(aliasBase | phys, size)) {
       return true;
     }
