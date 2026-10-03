@@ -24941,7 +24941,7 @@ jump_address_on_true = 0x822C2F7C
 # 0x821315E4: `bl sub_822E5B00` in sub_82131508, reached with r4 = -1 when there is
 # no legals object. -1 sets bit 24 of the render pass mask at mgr+364, which every
 # other caller (sub_821F9918, sub_821FCED8) leaves clear via 0xFEFFFFFF. The extra
-# pass draws with an unprepared stage and corrupts the frame. See hooks.cpp.
+# pass draws with an unprepared stage and corrupts the frame. See hooks/ui.cpp.
 [[midasm_hook]]
 address = 0x821315E4
 name = "MCLA_SkipIntroRenderPassMask"

@@ -45,7 +45,7 @@
 #include "hud_units.h"
 #include "logging.h"
 
-// Same switch that drives the game's own metric formatter, defined in hooks.cpp:
+// Same switch that drives the game's own metric formatter, defined in hooks/ui.cpp:
 // one knob for units, not two. "kmh" converts the HUD, "game"/"mph" leave it.
 REXCVAR_DECLARE(std::string, speed_units);
 
