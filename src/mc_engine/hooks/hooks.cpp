@@ -746,20 +746,6 @@ void Patch_DeltaTimePre() {
     g_frame_heartbeat.fetch_add(1, std::memory_order_relaxed);
 }
 
-// The player's current district (return of Racer_GetCurrentDistrict). Fires on
-// the game's own district queries -> the RPC updates the area live while driving.
-void Hook_CaptureDistrict(PPCRegister& r3) {
-    // rpc-diag: confirm the hook fires + what district it sees. Remove later.
-    static int last_diag = -999;
-    int idx = static_cast<int>(r3.u64);
-    if (idx != last_diag) {
-        last_diag = idx;
-        LARECOMP_APP_INFO("[rpc-diag] district hook fired, idx={}", idx);
-    }
-    RpcOnDistrictChanged(idx);
-}
-
-
 // LZX streaming decompression probe. pgStreamer worker threads decompress
 // world resources through zlibInflater::InflateBegin (sub_821D5E10), which
 // wraps the statically linked XMemDecompressStream (sub_8244FF20, XCompress
@@ -899,7 +885,6 @@ void Hook_LzxDecompressPost(PPCRegister& r1, PPCRegister& r3) {
 
 void InitHooks() {}
 void Patch_DeltaTimePre() {}
-void Hook_CaptureDistrict(PPCRegister& r3) {}
 void Hook_LzxDecompressPre(PPCRegister& r1) {}
 void Hook_LzxDecompressPost(PPCRegister& r1, PPCRegister& r3) {}
 void MCLA_StreamOpenResult(PPCRegister& r1, PPCRegister& r3) {}
