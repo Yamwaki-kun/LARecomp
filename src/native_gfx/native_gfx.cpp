@@ -10,8 +10,12 @@
 #include "native_gfx.h"
 
 #include <atomic>
+#include <chrono>
+#include <cstddef>
 #include <cstdio>
+#include <cstring>
 #include <string>
+#include <vector>
 
 #include <rex/cvar.h>
 #include <rex/system/interfaces/graphics.h>
@@ -32,6 +36,9 @@
 #include "d3d12/external_blit.h"
 #include "d3d12/frame_capture.h"
 #include "d3d12/memory_census.h"
+#include "d3d12/image_dump.h"
+#include "guest/d3d_structs.h"
+#include "guest/guest_resources.h"
 #include "guest/occlusion.h"
 #include "guest/render_state.h"
 #include "guest/resource_lock.h"
@@ -131,6 +138,23 @@ REXCVAR_DEFINE_BOOL(
     "Does NOT replace the write watch: writes that never go through a lock (streaming straight "
     "into resource memory) are only caught by the watch. Off by default until the counters show "
     "the ranges are sane -- see the lock line in the periodic report.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_BOOL(
+    mcla_native_gfx_lock_writeback, true, "MCLA/NativeGfx",
+    "Fix: photo mode and Rate My Ride pictures come out black. The game takes a picture on the "
+    "CPU: it locks the front buffer, untiles it and JPEG-encodes it (sub_82178B20). On the "
+    "console a resolve writes main memory; here the resolved image only exists as a GPU copy, so "
+    "the CPU read zeros. When the guest locks a surface the GPU produced, this copies that "
+    "resolve back into guest memory at that moment, in the guest's own layout. Costs one GPU "
+    "wait per lock of such a surface and nothing otherwise. Off for A/B.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_BOOL(
+    mcla_native_gfx_lock_writeback_dump, false, "MCLA/NativeGfx",
+    "TEMP DIAG for mcla_native_gfx_lock_writeback: after each write-back, read the guest memory "
+    "back the way the photo grab does (untile, swap every dword, bytes 1..3 as R,G,B) and write "
+    "it to native_gfx_lockwb_<address>.tga, plus the average colour in the log line.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_BOOL(mcla_native_gfx, false, "MCLA/NativeGfx",
@@ -882,6 +906,40 @@ std::atomic<uint32_t> g_present_refresh_false{0};
 std::atomic<uint32_t> g_present_no_cmdlist{0};
 std::atomic<uint32_t> g_present_blit_false{0};
 
+// Serializes the render path against work that arrives from another guest
+// thread. Every render-side entry point (draws, resolves, the frame boundary)
+// runs on whichever thread owns the guest's D3D device -- "[MC] Render Thread"
+// in gameplay -- and the runtime was written for exactly one such thread at a
+// time. A D3DResource_Lock is different: the photo grab (sub_82178B20) locks
+// the front buffer from the update thread, which in render mode 2
+// (dword_8288B9F4, fixed at boot) runs one frame ahead of the render thread,
+// in parallel. Serving that lock needs the render thread's command list, pool
+// and resolve copies, so the two have to take turns.
+//
+// Held only inside native code, never across a call back into the guest, so it
+// cannot deadlock against the guest's own semaphores. Re-entrant per thread.
+SRWLOCK g_render_gate = SRWLOCK_INIT;
+thread_local uint32_t t_render_gate_depth = 0;
+
+class RenderGateGuard {
+ public:
+  RenderGateGuard() {
+    if (t_render_gate_depth++ == 0) {
+      AcquireSRWLockExclusive(&g_render_gate);
+    }
+  }
+  ~RenderGateGuard() {
+    if (--t_render_gate_depth == 0) {
+      ReleaseSRWLockExclusive(&g_render_gate);
+    }
+  }
+  RenderGateGuard(const RenderGateGuard&) = delete;
+  RenderGateGuard& operator=(const RenderGateGuard&) = delete;
+};
+
+// The host thread that last ran a frame boundary, for the write-back log.
+std::atomic<uint32_t> g_render_thread_id{0};
+
 // One-time lazy setup: resolve the SDK graphics system, require the D3D12
 // backend, initialize the smoke-test renderer. Any failure latches kFailed
 // and logs once; the guest swap then proceeds normally.
@@ -1107,6 +1165,7 @@ static bool EnsureDrawReady() {
 void TryFirstDraw(const uint8_t* base, uint32_t dev, uint32_t primitive_type,
                   uint32_t element_count, uint32_t start_element, int32_t base_vertex,
                   bool indexed) {
+  RenderGateGuard gate;
   const bool want_continuous = REXCVAR_GET(mcla_native_gfx_continuous);
   const bool want_capture = REXCVAR_GET(mcla_native_gfx_capture) > 0 || want_continuous;
   const bool want_first = REXCVAR_GET(mcla_native_gfx_firstdraw);
@@ -1154,6 +1213,7 @@ void NotifyResolve(const uint8_t* base, uint32_t dev, uint32_t flags, uint32_t d
   if (!Active() || !dest_texture) {
     return;
   }
+  RenderGateGuard gate;
   // The destination is a D3D texture object holding the same six-dword fetch
   // constant a later draw samples, at +28. Confirmed against the guest's own
   // resolve (sub_82420BA8), which reads the address as
@@ -1575,6 +1635,7 @@ void NoteEndVertices(const uint8_t* base, uint32_t dev) {
   if (!g_pending_inline.valid) {
     return;
   }
+  RenderGateGuard gate;
   const PendingInlineDraw d = g_pending_inline;
   g_pending_inline.valid = false;
   // Inline geometry (BeginVertices/EndVertices) is how the guest issues the
@@ -1610,8 +1671,241 @@ void NoteEndVertices(const uint8_t* base, uint32_t dev) {
 
 bool ShouldDumpRenderTargets() { return REXCVAR_GET(mcla_native_gfx_dumprt); }
 
+namespace {
+
+// Which RGBA channel goes in each byte component of a k_8_8_8_8 texel, read
+// off the fetch constant instead of assumed. Component k is byte k of the
+// 32-bit word after the fetch's endian swap -- the model the texture cache
+// decodes every k_8_8_8_8 with -- and the swizzle says which component each
+// channel is taken from.
+//
+// For the front buffer (endian none, swizzle 0xA0A: R=comp2 G=comp1 B=comp0,
+// alpha the constant 1) that puts B,G,R,A in memory, which is what the photo
+// grab needs: sub_82178B20 untiles, swaps every dword (XGEndianSwapMemory
+// 0x40001) and sub_82775C60 hands bytes 1..3 of each pixel to libjpeg as
+// R,G,B. Two independent readings of the guest, one answer.
+struct Byte4Layout {
+  uint8_t channel[4] = {0, 1, 2, 3};  // channel stored in component k; 0=R 1=G 2=B 3=A
+  bool valid = false;
+};
+
+Byte4Layout Byte4LayoutForSwizzle(uint32_t swizzle) {
+  Byte4Layout layout;
+  bool used[4] = {false, false, false, false};
+  for (uint32_t ch = 0; ch < 3; ++ch) {
+    const uint32_t s = (swizzle >> (3 * ch)) & 7u;
+    if (s > 3u || used[s]) {
+      return layout;  // a constant or repeated colour channel has no inverse
+    }
+    used[s] = true;
+    layout.channel[s] = uint8_t(ch);
+  }
+  // Alpha goes to the component the swizzle names, or, when the swizzle
+  // forces it to a constant (X8R8G8B8), to the one component left over.
+  uint32_t a = (swizzle >> 9) & 7u;
+  if (a > 3u || used[a]) {
+    a = 0;
+    while (used[a]) {
+      ++a;
+    }
+  }
+  layout.channel[a] = 3;
+  layout.valid = true;
+  return layout;
+}
+
+// The guest endian swaps are their own inverse.
+inline uint32_t SwapGuestEndian32(uint32_t v, uint32_t endianness) {
+  switch (endianness) {
+    case 1:  // k8in16
+      return ((v & 0x00FF00FFu) << 8) | ((v >> 8) & 0x00FF00FFu);
+    case 2:  // k8in32
+      return __builtin_bswap32(v);
+    case 3:  // k16in32
+      return (v << 16) | (v >> 16);
+    default:
+      return v;
+  }
+}
+
+std::atomic<uint32_t> g_lock_writebacks{0};
+
+// TEMP DIAG (mcla_native_gfx_lock_writeback_dump): reads the surface back the
+// way the photo grab does -- untile, swap every dword, bytes 1..3 as R,G,B --
+// writes it to a TGA and returns its average colour.
+void DumpLockWriteBack(uint32_t dest, const uint8_t* guest, uint64_t span, uint32_t width,
+                       uint32_t height, bool tiled, uint32_t pitch_bytes, double mean_rgb[3]) {
+  std::vector<uint8_t> linear(size_t(width) * height * 4u);
+  if (tiled) {
+    UntileSurface2D(linear.data(), width * 4u, guest, span, width, height, 4u);
+  } else {
+    for (uint32_t y = 0; y < height; ++y) {
+      std::memcpy(linear.data() + size_t(y) * width * 4u, guest + size_t(y) * pitch_bytes,
+                  size_t(width) * 4u);
+    }
+  }
+  std::vector<uint8_t> bgra(linear.size());
+  double sum[3] = {0.0, 0.0, 0.0};
+  for (size_t i = 0; i < linear.size(); i += 4) {
+    uint32_t v;
+    std::memcpy(&v, linear.data() + i, 4);
+    v = __builtin_bswap32(v);
+    uint8_t px[4];
+    std::memcpy(px, &v, 4);
+    bgra[i + 0] = px[3];
+    bgra[i + 1] = px[2];
+    bgra[i + 2] = px[1];
+    bgra[i + 3] = 255;
+    sum[0] += px[1];
+    sum[1] += px[2];
+    sum[2] += px[3];
+  }
+  const double n = double(width) * height;
+  for (int c = 0; c < 3; ++c) {
+    mean_rgb[c] = n > 0.0 ? sum[c] / n : 0.0;
+  }
+  char name[64];
+  std::snprintf(name, sizeof(name), "native_gfx_lockwb_%08X.tga", dest);
+  WriteBgraTga(name, width, height, bgra.data());
+}
+
+// The guest is about to read, with the CPU, a surface whose pixels only exist
+// on the GPU. On the console the resolve wrote them to main memory; here the
+// resolve only made a GPU copy (RenderTargetPool::NoteResolve), so guest
+// memory still holds whatever was there -- zeros for the front buffer, hence
+// the black photos. Copy that resolve into guest memory now, in the layout the
+// guest's own fetch constant describes. Nothing is armed ahead of time and no
+// resolve is read back speculatively: the lock IS the request.
+void WriteBackGpuSurfaceForLock(const uint8_t* base, uint32_t resource_va) {
+  if (!REXCVAR_GET(mcla_native_gfx_lock_writeback) || !base || resource_va < 0x1000u ||
+      !IsGuestRangeReadable(resource_va, sizeof(D3DTexture))) {
+    return;
+  }
+  const auto load_be32 = [&](uint32_t ea) {
+    uint32_t v;
+    std::memcpy(&v, rex::memory::GuestPtr(const_cast<uint8_t*>(base), ea), 4);
+    return __builtin_bswap32(v);
+  };
+  // Everything up to the gate is a guest read: vertex and index buffers are
+  // locked thousands of times a minute and must stay as cheap as before.
+  if ((load_be32(resource_va) & 0xFu) != kBaseTypeTexture) {
+    return;
+  }
+  uint32_t d[6];
+  for (uint32_t i = 0; i < 6; ++i) {
+    d[i] = load_be32(resource_va + uint32_t(offsetof(D3DTexture, Format)) + 4u * i);
+  }
+  const TextureFetch fetch = DecodeTextureFetch(d);
+  // k_8_8_8_8, 2D, a single level: the front buffer. A surface with a mip
+  // chain would also need its smaller levels, which this does not produce.
+  if (!fetch.type_valid || fetch.format != 6u || fetch.dimension != 1u ||
+      fetch.mip_address != 0u || fetch.width == 0 || fetch.height == 0) {
+    return;
+  }
+  const Byte4Layout layout = Byte4LayoutForSwizzle(fetch.swizzle);
+  if (!layout.valid) {
+    return;
+  }
+  // Same page fixup as NotifyResolve: the address a resolve writes is the
+  // texture base plus a page that depends on bits 20+ (sub_82420BA8).
+  const uint32_t raw = fetch.base_address;
+  const uint32_t dest = (((raw >> 20) + 512u) & 0x1000u) + (raw & 0x1FFFFFFFu);
+
+  // Destination extent: tiled surfaces are padded to 32x32-texel tiles.
+  const uint32_t pitch_texels = fetch.pitch ? fetch.pitch : fetch.width;
+  const uint32_t pitch_bytes = pitch_texels * 4u;
+  const uint64_t span = fetch.tiled ? uint64_t(AlignToTile(fetch.width)) *
+                                          AlignToTile(fetch.height) * 4u
+                                    : uint64_t(pitch_bytes) * fetch.height;
+
+  RenderGateGuard gate;
+  // Only an address a resolve wrote with exactly this extent, and only once
+  // per resolve: a second lock finds guest memory already current.
+  if (!g_draw_ready || !g_render_targets.NeedsGuestWriteBack(dest, fetch.width, fetch.height)) {
+    return;
+  }
+  if (!IsPhysicalRangeReadable(dest, span)) {
+    REXLOG_WARN("[native_gfx] lock write-back {:#010x}: guest range of {} bytes not mapped", dest,
+                span);
+    return;
+  }
+  uint8_t* guest = const_cast<uint8_t*>(TranslatePhysicalGuest(dest));
+  if (!guest) {
+    return;
+  }
+  const auto t0 = std::chrono::steady_clock::now();
+  if (!FlushOpenDrawBatch(g_draw_context)) {
+    REXLOG_ERROR("[native_gfx] lock write-back {:#010x}: closing the open draw batch failed",
+                 dest);
+    return;
+  }
+  const auto t1 = std::chrono::steady_clock::now();
+  RenderTargetPool::CpuReadback rb;
+  if (!g_render_targets.ReadbackResolvedColor(g_draw_context, dest, fetch.width, fetch.height,
+                                              &rb)) {
+    REXLOG_WARN("[native_gfx] lock write-back {:#010x} {}x{}: no 8:8:8:8 resolve copy to read",
+                dest, fetch.width, fetch.height);
+    return;
+  }
+  const auto t2 = std::chrono::steady_clock::now();
+
+  // Source channel positions in the copy's own format.
+  const bool src_bgra = rb.dxgi_format == DXGI_FORMAT_B8G8R8A8_UNORM ||
+                        rb.dxgi_format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+  const uint8_t src_index[4] = {uint8_t(src_bgra ? 2 : 0), 1, uint8_t(src_bgra ? 0 : 2), 3};
+  uint64_t sum_rgb[3] = {0, 0, 0};
+  for (uint32_t y = 0; y < fetch.height; ++y) {
+    const uint8_t* row = rb.pixels.data() + size_t(y) * fetch.width * 4u;
+    for (uint32_t x = 0; x < fetch.width; ++x) {
+      const uint8_t* px = row + size_t(x) * 4u;
+      const uint32_t v = uint32_t(px[src_index[layout.channel[0]]]) |
+                         (uint32_t(px[src_index[layout.channel[1]]]) << 8) |
+                         (uint32_t(px[src_index[layout.channel[2]]]) << 16) |
+                         (uint32_t(px[src_index[layout.channel[3]]]) << 24);
+      const uint32_t stored = SwapGuestEndian32(v, fetch.endianness);
+      const uint32_t offset = fetch.tiled ? TiledOffset2D(x, y, fetch.width, 4u)
+                                          : y * pitch_bytes + x * 4u;
+      std::memcpy(guest + offset, &stored, 4);
+      sum_rgb[0] += px[src_index[0]];
+      sum_rgb[1] += px[src_index[1]];
+      sum_rgb[2] += px[src_index[2]];
+    }
+  }
+  const auto t3 = std::chrono::steady_clock::now();
+
+  const uint32_t n = g_lock_writebacks.fetch_add(1, std::memory_order_relaxed) + 1;
+  const double texels = double(fetch.width) * fetch.height;
+  // What the GPU copy held, before any guest-side interpretation: an all-black
+  // average here means the copy itself was empty, not the write-back.
+  const double copy_mean[3] = {sum_rgb[0] / texels, sum_rgb[1] / texels, sum_rgb[2] / texels};
+  double guest_mean[3] = {-1.0, -1.0, -1.0};
+  if (REXCVAR_GET(mcla_native_gfx_lock_writeback_dump)) {
+    DumpLockWriteBack(dest, guest, span, fetch.width, fetch.height, fetch.tiled, pitch_bytes,
+                      guest_mean);
+  }
+  // Rare by construction (one per photo), so every one is worth a line; the
+  // cap only protects the log if something starts locking a surface per frame.
+  if (n <= 64u || (n % 256u) == 0u) {
+    const auto ms = [](auto a, auto b) {
+      return std::chrono::duration<double, std::milli>(b - a).count();
+    };
+    REXLOG_INFO(
+        "[native_gfx] lock write-back #{}: {:#010x} {}x{} tiled={} endian={} swizzle={:#05x} "
+        "from {} copy (dxgi {}) | flush {:.2f} ms, readback {:.2f} ms, write {:.2f} ms | "
+        "thread {} (render {}) | copy mean rgb {:.1f} {:.1f} {:.1f} | guest view {:.1f} {:.1f} "
+        "{:.1f}",
+        n, dest, fetch.width, fetch.height, fetch.tiled ? 1 : 0, fetch.endianness, fetch.swizzle,
+        rb.from_variant ? "variant" : "newest", rb.dxgi_format, ms(t0, t1), ms(t1, t2), ms(t2, t3),
+        GetCurrentThreadId(), g_render_thread_id.load(std::memory_order_relaxed), copy_mean[0],
+        copy_mean[1], copy_mean[2], guest_mean[0], guest_mean[1], guest_mean[2]);
+  }
+}
+
+}  // namespace
+
 void NoteResourceLocked(const uint8_t* base, uint32_t resource_va) {
   NoteResourceLock(base, resource_va);
+  WriteBackGpuSurfaceForLock(base, resource_va);
 }
 
 void NoteResourceUnlocked(const uint8_t* base, uint32_t resource_va, uint32_t base_address,
@@ -1667,6 +1961,8 @@ void NoteD3DTextureCreated(const uint8_t* base, uint32_t d3d_texture_va) {
 }
 
 void NotifyFrameBoundary() {
+  RenderGateGuard gate;
+  g_render_thread_id.store(GetCurrentThreadId(), std::memory_order_relaxed);
   // Geometry is what exhausts the upload ring (measured: ~16 MiB in ~93
   // allocations every frame, while constants and textures never get a turn).
   // This split says whether those are fresh regions or re-uploads of dirtied
@@ -2108,6 +2404,7 @@ void NoteSwapHook() {
 }
 
 bool PresentFrame() {
+  RenderGateGuard gate;
   if (!PresentTakeover()) {
     g_present_no_takeover.fetch_add(1, std::memory_order_relaxed);
     return false;

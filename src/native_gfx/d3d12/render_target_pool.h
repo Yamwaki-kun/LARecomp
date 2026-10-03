@@ -244,6 +244,34 @@ class RenderTargetPool : public RenderTargetLookup {
                      RenderTarget& source, bool from_depth, uint32_t dest_address,
                      uint32_t width, uint32_t height);
 
+  // A colour resolve brought back to the CPU, rows tightly packed (width * 4
+  // bytes each), in the channel order of `dxgi_format`.
+  struct CpuReadback {
+    std::vector<uint8_t> pixels;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t dxgi_format = 0;
+    // The copy was a retired variant rather than the newest resolve at the
+    // address: the guest resolved something of another shape there since.
+    bool from_variant = false;
+  };
+
+  // Reads the 8:8:8:8 colour resolve registered at `dest_address` with exactly
+  // this extent back to the CPU. For a guest that locks a resolve destination
+  // and reads it with the CPU, which on the console sees the pixels the resolve
+  // wrote to main memory; here they only ever exist in the copy. Queued resolve
+  // copies are flushed first, since the lock can come before the next draw that
+  // would issue them. Opens its own command list, so the caller must have
+  // closed any open batch, and waits for the GPU: for rare reads only. Returns
+  // false when there is no usable copy.
+  bool ReadbackResolvedColor(D3D12Context& context, uint32_t dest_address, uint32_t width,
+                             uint32_t height, CpuReadback* out);
+
+  // True when an 8:8:8:8 colour copy of exactly this extent exists at the
+  // address and guest memory does not hold it yet -- i.e. a CPU lock there
+  // needs ReadbackResolvedColor. No GPU work.
+  bool NeedsGuestWriteBack(uint32_t dest_address, uint32_t width, uint32_t height);
+
   // RenderTargetLookup.
   ID3D12Resource* FindResolvedTarget(uint32_t guest_address, uint32_t width, uint32_t height,
                                      bool want_depth,
@@ -345,12 +373,23 @@ class RenderTargetPool : public RenderTargetLookup {
     // fetch: (stencil, D[7:0], D[15:8], D[23:16]).
     Microsoft::WRL::ComPtr<ID3D12Resource> packed8888;
     D3D12_RESOURCE_STATES packed8888_state = D3D12_RESOURCE_STATE_COMMON;
+    // Guest memory already holds this copy's pixels: ReadbackResolvedColor
+    // wrote it back and no resolve has landed here since. Lets a second lock
+    // skip the GPU wait, and keeps a stale copy from overwriting what the CPU
+    // wrote after it took the first one. Every NoteResolve clears it.
+    bool guest_current = false;
   };
 
   // Builds (or refreshes) the packed depth+stencil copy of `dst`. No-op when
   // the entry is not a two-plane depth-stencil.
   void PackResolvedDepthStencil(D3D12Context& context, ID3D12GraphicsCommandList* cl,
                                 ResolvedCopy& dst);
+
+  // The 8:8:8:8 colour copy of exactly this extent at the address: the newest
+  // resolve there, else its retired variant (the address is aliased). Null if
+  // neither fits.
+  ResolvedCopy* FindCpuReadableCopy(uint32_t dest_address, uint32_t width, uint32_t height,
+                                    bool* from_variant);
 
 
   // A pass renders into one target, but the guest cycles through many

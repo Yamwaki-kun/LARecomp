@@ -72,6 +72,12 @@ bool PrepareContinuousDisplay(D3D12Context& context, RenderTargetPool& render_ta
 // Returns null if none is ready.
 void* GetContinuousDisplayResource(uint32_t* srv_format, uint32_t* width, uint32_t* height);
 
+// Closes and submits the draw batch the capture has open, if any, so the
+// context can open a command list of its own. Draws are recorded in batches
+// that stay open across hooks, and D3D12Context::BeginFrame refuses to open a
+// second list while one is. The next draw simply opens a new batch.
+bool FlushOpenDrawBatch(D3D12Context& context);
+
 // Offers one guest draw to the capture. Ignores draws that do not match the
 // established render target configuration.
 void CaptureDraw(const uint8_t* base, uint32_t dev, uint32_t primitive_type,

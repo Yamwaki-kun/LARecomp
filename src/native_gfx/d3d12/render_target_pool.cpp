@@ -646,6 +646,8 @@ void RenderTargetPool::NoteResolve(RenderTarget& source, bool from_depth,
     }
     it = resolved_.emplace(dest_address, std::move(copy)).first;
   }
+  // New pixels on their way: whatever guest memory holds is now older.
+  it->second.guest_current = false;
 
   // A resolve must not submit work (hundreds per frame, on the queue shared
   // with the Xenia command processor), so the copy is queued and issued on the
@@ -2023,6 +2025,146 @@ bool RenderTargetPool::AliasMissedColourResolve(uint32_t dest_address, uint32_t 
   c.height = height;
   c.dxgi_format = best->dxgi_format;
   c.state = best->state;
+  return true;
+}
+
+namespace {
+// The colour formats a guest 8:8:8:8 surface can be read back from.
+bool IsByte4Colour(uint32_t dxgi) {
+  switch (dxgi) {
+    case DXGI_FORMAT_R8G8B8A8_UNORM:
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+    case DXGI_FORMAT_B8G8R8A8_UNORM:
+    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+      return true;
+    default:
+      return false;
+  }
+}
+}  // namespace
+
+RenderTargetPool::ResolvedCopy* RenderTargetPool::FindCpuReadableCopy(uint32_t dest_address,
+                                                                      uint32_t width,
+                                                                      uint32_t height,
+                                                                      bool* from_variant) {
+  // `resource` is not required: a copy queued since the last draw is created
+  // by the flush that precedes the read, and NeedsGuestWriteBack has to see it.
+  const auto usable = [&](const ResolvedCopy& c) {
+    return !c.from_depth && c.width == width && c.height == height &&
+           IsByte4Colour(c.dxgi_format);
+  };
+  if (from_variant) {
+    *from_variant = false;
+  }
+  auto it = resolved_.find(dest_address);
+  if (it != resolved_.end() && usable(it->second)) {
+    return &it->second;
+  }
+  // MCLA aliases its front buffers with the scene's HDR resolve: both use
+  // 0x07C48000, so if the render thread is already past the next frame's HDR
+  // resolve the newest copy there is the 64 bpp one. The front buffer's copy
+  // is still held as its retired variant.
+  for (ResolvedSpare& spare : resolved_spares_) {
+    if (spare.address == dest_address && usable(spare.copy)) {
+      if (from_variant) {
+        *from_variant = true;
+      }
+      return &spare.copy;
+    }
+  }
+  return nullptr;
+}
+
+bool RenderTargetPool::NeedsGuestWriteBack(uint32_t dest_address, uint32_t width,
+                                           uint32_t height) {
+  const ResolvedCopy* copy = FindCpuReadableCopy(dest_address, width, height, nullptr);
+  return copy && !copy->guest_current;
+}
+
+bool RenderTargetPool::ReadbackResolvedColor(D3D12Context& context, uint32_t dest_address,
+                                             uint32_t width, uint32_t height,
+                                             CpuReadback* out) {
+  if (!out || width == 0 || height == 0) {
+    return false;
+  }
+  ID3D12GraphicsCommandList* cl = context.BeginFrame();
+  if (!cl) {
+    return false;
+  }
+  // The resolve the guest is about to read may still be queued: copies are
+  // issued on the next draw's command list, and nothing says a draw comes
+  // before the lock.
+  FlushPendingCopies(context, cl);
+
+  bool from_variant = false;
+  ResolvedCopy* copy = FindCpuReadableCopy(dest_address, width, height, &from_variant);
+  if (!copy || !copy->resource) {
+    context.EndFrame();  // the flush may have recorded copies
+    return false;
+  }
+
+  ID3D12Device* device = context.device();
+  const D3D12_RESOURCE_DESC src_desc = copy->resource->GetDesc();
+  D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = {};
+  UINT64 bytes = 0;
+  device->GetCopyableFootprints(&src_desc, 0, 1, 0, &footprint, nullptr, nullptr, &bytes);
+  D3D12_RESOURCE_DESC rb = {};
+  rb.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  rb.Width = bytes;
+  rb.Height = 1;
+  rb.DepthOrArraySize = 1;
+  rb.MipLevels = 1;
+  rb.SampleDesc.Count = 1;
+  rb.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  Microsoft::WRL::ComPtr<ID3D12Resource> readback;
+  if (FAILED(device->CreateCommittedResource(&rex::ui::d3d12::util::kHeapPropertiesReadback,
+                                             D3D12_HEAP_FLAG_NONE, &rb,
+                                             D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                             IID_PPV_ARGS(&readback)))) {
+    context.EndFrame();
+    return false;
+  }
+  const D3D12_RESOURCE_STATES state = copy->state;
+  if (state != D3D12_RESOURCE_STATE_COPY_SOURCE) {
+    BarrierBatch::Transition(cl, copy->resource.Get(), state, D3D12_RESOURCE_STATE_COPY_SOURCE);
+  }
+  D3D12_TEXTURE_COPY_LOCATION dst_loc = {}, src_loc = {};
+  dst_loc.pResource = readback.Get();
+  dst_loc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+  dst_loc.PlacedFootprint = footprint;
+  src_loc.pResource = copy->resource.Get();
+  src_loc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+  src_loc.SubresourceIndex = 0;
+  cl->CopyTextureRegion(&dst_loc, 0, 0, 0, &src_loc, nullptr);
+  if (state != D3D12_RESOURCE_STATE_COPY_SOURCE) {
+    BarrierBatch::Transition(cl, copy->resource.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, state);
+  }
+  if (!context.EndFrame()) {
+    return false;
+  }
+  context.WaitForIdle();
+
+  void* mapped = nullptr;
+  const D3D12_RANGE read_range = {0, size_t(bytes)};
+  if (FAILED(readback->Map(0, &read_range, &mapped)) || !mapped) {
+    return false;
+  }
+  const size_t row_bytes = size_t(width) * 4u;
+  out->pixels.resize(row_bytes * height);
+  const auto* src = static_cast<const uint8_t*>(mapped);
+  for (uint32_t y = 0; y < height; ++y) {
+    std::memcpy(out->pixels.data() + row_bytes * y,
+                src + size_t(footprint.Footprint.RowPitch) * y, row_bytes);
+  }
+  const D3D12_RANGE no_write = {0, 0};
+  readback->Unmap(0, &no_write);
+  out->width = width;
+  out->height = height;
+  out->dxgi_format = copy->dxgi_format;
+  out->from_variant = from_variant;
+  // The caller writes these pixels to guest memory next; until the guest
+  // resolves here again, a lock finds memory already current.
+  copy->guest_current = true;
   return true;
 }
 

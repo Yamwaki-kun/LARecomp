@@ -1320,6 +1320,8 @@ void Finish(D3D12Context& context, PipelineCache& pipelines, BufferCache& buffer
 
 }  // namespace
 
+bool FlushOpenDrawBatch(D3D12Context& context) { return FlushBatch(context); }
+
 void NoteCommandListStateDisturbed() {
   if (SideListOpenOnThisThread()) {
     return;  // a pass on the side list leaves the main list's state alone
