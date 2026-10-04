@@ -40,9 +40,15 @@ void TryFirstDraw(const uint8_t* base, uint32_t dev, uint32_t primitive_type,
 // Called from the D3DDevice_Resolve hook. Ties the guest address a resolve
 // writes to the native render target that produced it, so a later texture
 // fetch at that address finds a real resource instead of stale guest memory.
+//
+// `dest_level` is D3DDevice_Resolve's DestLevel: the mip level of the
+// destination texture the copy lands in. rage's GenerateMipMaps
+// (sub_82184588) renders each level of a render target with a mip chain and
+// resolves it with DestLevel = level, so a non-zero value is the address of
+// that level, not of the texture base.
 void NotifyResolve(const uint8_t* base, uint32_t dev, uint32_t flags,
                    uint32_t dest_texture, uint32_t source_rect, uint32_t dest_point,
-                   uint32_t clear_color_ptr);
+                   uint32_t clear_color_ptr, uint32_t dest_level = 0);
 
 // Called from the rage::grcDevice::EndFrame hook.
 void NotifyFrameBoundary();

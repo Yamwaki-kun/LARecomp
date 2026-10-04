@@ -1223,7 +1223,8 @@ void TryFirstDraw(const uint8_t* base, uint32_t dev, uint32_t primitive_type,
 constexpr uint32_t kClearOnlyResolveMaxDimension = 64u;
 
 void NotifyResolve(const uint8_t* base, uint32_t dev, uint32_t flags, uint32_t dest_texture,
-                   uint32_t source_rect, uint32_t dest_point, uint32_t clear_color_ptr) {
+                   uint32_t source_rect, uint32_t dest_point, uint32_t clear_color_ptr,
+                   uint32_t dest_level) {
   if (!Active() || !dest_texture) {
     return;
   }
@@ -1288,6 +1289,9 @@ void NotifyResolve(const uint8_t* base, uint32_t dev, uint32_t flags, uint32_t d
   // Every destination, colour included: the address is what marks the data as
   // GPU-produced, and a colour target is invisible to a format-based test.
   NoteFrameCaptureResolve(dest, fetch.width, fetch.height, from_depth);
+
+  // A copy into mip level N > 0 of the destination rather than level 0.
+  const bool level_resolve = dest_level != 0;
 
   // Tie the destination to the target that produced it. The source is
   // whatever the guest was rendering into at this moment, so the render state
@@ -1387,6 +1391,17 @@ void NotifyResolve(const uint8_t* base, uint32_t dev, uint32_t flags, uint32_t d
       source->needs_depth_reclear = true;
       NoteReclearArmed("guest", source->key.width, source->key.height);
     }
+  }
+  // A resolve into mip level N > 0: GenerateMipMaps renders each level from the
+  // one above and resolves it with DestLevel = N. Its pixels belong to that
+  // level's own memory, not to the texture base, where NoteResolve used to
+  // paste them over the top-left corner of level 0 -- levels 1..3 of
+  // 0x02FE2000 every frame, levels 1..7 over the vinyl composite at
+  // 0x050A0000. No mip level is bridged: a fetch is served level 0, and a CPU
+  // lock derives the smaller levels from it (WriteBackGpuSurfaceForLock). Past
+  // the clear it asked for, applied above, there is nothing to register.
+  if (level_resolve) {
+    return;
   }
   if (!source && !from_depth && REXCVAR_GET(mcla_native_gfx_clear_only_resolve)) {
     // CLEAR-ONLY PASS.

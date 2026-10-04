@@ -632,10 +632,11 @@ extern "C" REX_FUNC(D3DDevice_Resolve) {
   // and then 29 draws -- so each atlas ended up holding the union of several
   // trees and every distant tree rendered as one solid bush.
   const uint32_t clear_color_ptr = ctx.r10.u32;
+  const uint32_t dest_level = ctx.r8.u32;  // a6: DestLevel
   __imp__D3DDevice_Resolve(ctx, base);
   if (mcla::native_gfx::Active()) {
     mcla::native_gfx::NotifyResolve(base, dev, flags, dest_texture, source_rect, dest_point,
-                                    clear_color_ptr);
+                                    clear_color_ptr, dest_level);
   }
 }
 
