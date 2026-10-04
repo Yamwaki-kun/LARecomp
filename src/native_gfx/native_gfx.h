@@ -161,6 +161,9 @@ struct GuestClearRequest {
   uint32_t depth_surface = 0;
 };
 bool TakeGuestClear(GuestClearRequest* out);
+// Reads the pending request without consuming it, for a caller that must check
+// it belongs to its surface before taking it.
+bool PeekGuestClear(GuestClearRequest* out);
 
 // A resolve that also clears its source (RB_COPY_CONTROL colour/depth clear
 // bits) arms the same pending slot D3DDevice_Clear uses.

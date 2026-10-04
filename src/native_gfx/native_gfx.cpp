@@ -446,8 +446,8 @@ REXCVAR_DEFINE_BOOL(
     "Satisfy a colour resolve whose source pass was only CLEARED, never drawn into. "
     "Such a pass never asks the pool for a target, so the resolve is dropped and the "
     "destination keeps whatever guest memory held -- zero. MCLA does this for its small "
-    "shadow collectors (8x8 at 0x0329C000 and 0x0329D000, cleared to 0xFF7F7F7F once at "
-    "load), which the character eye material samples on its NIGHT path and multiplies "
+    "shadow collectors (8x8 at 0x0329C000 and 0x0329D000, cleared white and 0xFF7F7F7F "
+    "once at load), which the character eye material samples on its NIGHT path and multiplies "
     "into its light as saturate(-0.25 + s): reading zero paints every eye black after "
     "dark, while day worked because the day path samples the 256x256 collector that a "
     "real pass renders. Gated to a small surface whose fetch, viewport key and resolve "
@@ -455,6 +455,17 @@ REXCVAR_DEFINE_BOOL(
     "pending clear on a pass's first draw, so it surviving until the resolve is the "
     "no-draw signal. Turn off to get the dropped resolve back while bisecting.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_BOOL(
+    mcla_native_gfx_clear_only_found, true, "MCLA/NativeGfx",
+    "Extend mcla_native_gfx_clear_only_resolve to a clear-only pass whose shape the pool "
+    "already holds. MCLA clears its two 8x8 fake shadow collectors back to back at load "
+    "(sub_823120C8): the FastCollector white, then the Collector 0xFF7F7F7F. The second "
+    "resolve found the target the first one made and copied white. With shadows off "
+    "(perf_no_shadows, by day) sub_82311450 binds the Collector as ShadowCollectorTex and "
+    "every city material lights the sun with 2 * s, so the sunlit world came out twice as "
+    "bright as the emulated path. Applied only when the pending clear was made on the "
+    "surface being resolved. Off restores the old behaviour, for A/B.");
 
 REXCVAR_DEFINE_BOOL(
     mcla_native_gfx_gen_mips, false, "MCLA/NativeGfx",
@@ -1516,6 +1527,55 @@ void NotifyResolve(const uint8_t* base, uint32_t dev, uint32_t flags, uint32_t d
     std::memcpy(&v, rex::memory::GuestPtr(const_cast<uint8_t*>(base), ea), 4);
     return int32_t(__builtin_bswap32(v));
   };
+  // A CLEAR-ONLY pass whose shape the pool already holds. The guest cleared the
+  // surface and resolved it with no draw in between -- the clear is still
+  // pending, since a pass's first draw is what consumes it -- so what the
+  // console copies out is the clear colour, not whatever the pooled target last
+  // held. The miss branch below only covers the FIRST pass of a shape; every
+  // later one is answered by Find() with the target the first one made.
+  //
+  // Measured: at load sub_823120C8 clears the 8x8 "Fake FastCollector" white
+  // and resolves it, then clears the 8x8 "Fake Collector" to 0xFF7F7F7F and
+  // resolves that. The second resolve found the first one's target and copied
+  // WHITE. With no shadow pass running (perf_no_shadows, by day) sub_82311450
+  // binds the Fake Collector as ShadowCollectorTex, and the city materials
+  // light the sun with 2 * collector.y -- 2.0 instead of 0.996, so every sunlit
+  // surface got twice its light. Against the emulated path, same locked camera:
+  // frame mean 140.5 vs 116.9, 3.9% clipped vs 0.
+  //
+  // Narrower than the miss branch on purpose: the pending clear must have been
+  // made on the surface being resolved (dev+12440 at the clear and now), so a
+  // clear left pending by a pass whose draws never reached the runtime is not
+  // copied into this one. Exact Find() hits only, never the shape fallback.
+  if (found_exact && !from_depth && REXCVAR_GET(mcla_native_gfx_clear_only_resolve) &&
+      REXCVAR_GET(mcla_native_gfx_clear_only_found)) {
+    const bool shape_agrees = key.width == fetch.width && key.height == fetch.height;
+    const bool is_small = key.width <= kClearOnlyResolveMaxDimension &&
+                          key.height <= kClearOnlyResolveMaxDimension;
+    GuestClearRequest pending;
+    if (shape_agrees && (is_small || mipped_destination) && !level_resolve &&
+        PeekGuestClear(&pending) && pending.color) {
+      const uint32_t bound_color = ReadBoundSurfaces(base, dev).color0;
+      const bool same_surface = pending.color_surface != 0 && pending.color_surface == bound_color;
+      if (same_surface) {
+        TakeGuestClear(&pending);
+        g_render_targets.RequestClearOnlyFill(*source, pending.rgba);
+      }
+      static uint32_t n = 0;
+      if (REXCVAR_GET(mcla_native_gfx_diag) && n++ < 16u) {
+        if (FILE* f = std::fopen("native_gfx_diag.txt", "ab")) {
+          std::fprintf(f,
+                       "CLEARONLY_FOUND %s dest=0x%08X %ux%u rgba=%.3f,%.3f,%.3f,%.3f "
+                       "surf clear=%08X now=%08X\n",
+                       same_surface ? "APPLIED" : "skipped", dest, key.width, key.height,
+                       pending.rgba[0], pending.rgba[1], pending.rgba[2], pending.rgba[3],
+                       pending.color_surface, bound_color);
+          std::fflush(f);
+          std::fclose(f);
+        }
+      }
+    }
+  }
   if (source) {
     // RB_COPY_CONTROL rides in `flags`: bit 8 clears colour, bit 9 clears
     // depth, as part of the same resolve. That is how the guest separates one
@@ -1816,10 +1876,8 @@ void SetPendingResolveClear(const float rgba[4]) {
   g_guest_clear_pending.store(true, std::memory_order_release);
 }
 
-bool TakeGuestClear(GuestClearRequest* out) {
-  if (!g_guest_clear_pending.exchange(false, std::memory_order_acquire)) {
-    return false;
-  }
+namespace {
+void ReadPendingGuestClear(GuestClearRequest* out) {
   const uint32_t flags = g_guest_clear_flags.load(std::memory_order_relaxed);
   const uint32_t c = g_guest_clear_color.load(std::memory_order_relaxed);
   if (out) {
@@ -1835,6 +1893,22 @@ bool TakeGuestClear(GuestClearRequest* out) {
     out->color_surface = g_guest_clear_color_surface.load(std::memory_order_relaxed);
     out->depth_surface = g_guest_clear_depth_surface.load(std::memory_order_relaxed);
   }
+}
+}  // namespace
+
+bool TakeGuestClear(GuestClearRequest* out) {
+  if (!g_guest_clear_pending.exchange(false, std::memory_order_acquire)) {
+    return false;
+  }
+  ReadPendingGuestClear(out);
+  return true;
+}
+
+bool PeekGuestClear(GuestClearRequest* out) {
+  if (!g_guest_clear_pending.load(std::memory_order_acquire)) {
+    return false;
+  }
+  ReadPendingGuestClear(out);
   return true;
 }
 
