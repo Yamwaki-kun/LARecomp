@@ -226,6 +226,7 @@ REXCVAR_DECLARE(bool, mcla_native_gfx_state_cache);
 REXCVAR_DECLARE(bool, mcla_native_gfx_alpha_ref);
 REXCVAR_DECLARE(bool, mcla_native_gfx_guest_clear);
 REXCVAR_DECLARE(bool, mcla_native_gfx_reclear);
+REXCVAR_DECLARE(bool, mcla_native_gfx_reclear_depth);
 REXCVAR_DECLARE(bool, mcla_native_gfx_skip_punch);
 REXCVAR_DECLARE(uint32_t, mcla_native_gfx_skip_water);
 REXCVAR_DECLARE(uint32_t, mcla_native_gfx_msaa);
@@ -4161,11 +4162,48 @@ static void CaptureDrawImpl(const uint8_t* base, uint32_t dev, uint32_t primitiv
         cl->ClearRenderTargetView(rtv1, guest_clear.rgba, 1, &rect);
       }
     }
-    // Colour only. Depth already has its own rule, needs_depth_reclear above,
-    // driven by a full-source resolve -- which is the exact moment a pass ends.
-    // Clearing depth here as well fired mid-pass on the anchor and the shadow
-    // atlas (measured: 9 and 27 full-surface depth clears per capture) for no
-    // gain, since the resolve-driven rule had already covered both.
+    // The depth of a COMBINED clear stays out. Depth already has its own rule,
+    // needs_depth_reclear above, driven by a full-source resolve -- which is the
+    // exact moment a pass ends. Clearing depth here for those as well fired
+    // mid-pass on the anchor and the shadow atlas (measured: 9 and 27
+    // full-surface depth clears per capture) for no gain, since the
+    // resolve-driven rule had already covered both.
+    //
+    // A clear of depth/stencil ONLY is a different request: no pass ends there,
+    // the guest wants a fresh depth buffer under colour it keeps. The UI makes
+    // it right before its first 3D object (sub_82722140 arms it, sub_82722170
+    // issues flags 0x30), into the 1280x720 target that already took the
+    // ShadowFastBlend pass's ground earlier in the frame. Dropped, the menu
+    // cards (reverse-Z, GREATER) failed against that ground: the Rate My Ride
+    // leaderboard lost everything below the garage floor line (measured in a
+    // capture: backdrop z 0.0007 against 0.001..0.022 left from the ground).
+    //
+    // The request is consumed by whichever draw comes next, so it is honoured
+    // only while that draw is still on the surfaces the guest cleared. Depth
+    // goes to the target's own clear value -- the one its first-draw clear
+    // used, chosen from its viewport -- not the guest's Z, which is in the
+    // guest's depth convention.
+    if (guest_clear.depth && !guest_clear.color && REXCVAR_GET(mcla_native_gfx_reclear_depth)) {
+      const BoundSurfaces now = ReadBoundSurfaces(base, dev);
+      const bool same_surfaces = guest_clear.depth_surface != 0 &&
+                                 guest_clear.depth_surface == now.depth &&
+                                 guest_clear.color_surface == now.color0;
+      const bool rect_ok = rect.right > rect.left && rect.bottom > rect.top;
+      // A pass that samples its own depth has it bound read-only (see
+      // samples_own_depth above), so there is no writable view to clear.
+      const bool apply = same_surfaces && rect_ok && !samples_own_depth;
+      if (apply) {
+        D3D12_CLEAR_FLAGS ds_flags = D3D12_CLEAR_FLAGS(0);
+        if (guest_clear.flags & 0x10u) {
+          ds_flags |= D3D12_CLEAR_FLAG_DEPTH;
+        }
+        if (guest_clear.flags & 0x20u) {
+          ds_flags |= D3D12_CLEAR_FLAG_STENCIL;
+        }
+        cl->ClearDepthStencilView(dsv, ds_flags, target->clear_depth, guest_clear.stencil, 1,
+                                  &rect);
+      }
+    }
   }
 
   // TEMP DIAG (KEYMISMATCH): the pool's key against the resource it actually

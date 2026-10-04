@@ -358,6 +358,14 @@ REXCVAR_DEFINE_BOOL(mcla_native_gfx_reclear, true, "MCLA/NativeGfx",
                     "came back with other species smeared over the background, which put every "
                     "texel above the shadow shader's 10/255 cut and made every tree shadow a "
                     "square.");
+REXCVAR_DEFINE_BOOL(mcla_native_gfx_reclear_depth, true, "MCLA/NativeGfx",
+                    "Extend mcla_native_gfx_reclear to a guest clear of depth/stencil ONLY "
+                    "(no colour), applied when the draw that consumes it is still on the "
+                    "surfaces the guest cleared. The UI clears depth+stencil right before its "
+                    "first 3D object (sub_82722170); dropped, the 3D menu cards were depth "
+                    "tested against whatever an earlier pass of the same shape left in the "
+                    "pooled depth buffer -- the Rate My Ride leaderboard lost everything below "
+                    "the garage floor's depth. Off restores colour-only re-clears, for A/B.");
 
 REXCVAR_DEFINE_BOOL(mcla_native_gfx_dumprt, false, "MCLA/NativeGfx",
                     "Diagnostic: write every large resolve destination to a .tga at the end "
@@ -1750,10 +1758,14 @@ std::atomic<bool> g_guest_clear_pending{false};
 std::atomic<uint32_t> g_guest_clear_color{0};
 std::atomic<uint32_t> g_guest_clear_flags{0};
 std::atomic<float> g_guest_clear_z{0.0f};
+std::atomic<uint32_t> g_guest_clear_stencil{0};
+std::atomic<uint32_t> g_guest_clear_color_surface{0};
+std::atomic<uint32_t> g_guest_clear_depth_surface{0};
 std::atomic<uint32_t> g_guest_clear_calls{0};
 }  // namespace
 
-void NoteGuestClear(uint32_t flags, uint32_t color, float z, uint32_t stencil) {
+void NoteGuestClear(uint32_t flags, uint32_t color, float z, uint32_t stencil,
+                    uint32_t color_surface, uint32_t depth_surface) {
   const uint32_t n = g_guest_clear_calls.fetch_add(1, std::memory_order_relaxed);
   // TEMP DIAG: the point of the first build is to see WHICH clears arrive and
   // in what order relative to the policy clear, not just to apply them.
@@ -1773,6 +1785,9 @@ void NoteGuestClear(uint32_t flags, uint32_t color, float z, uint32_t stencil) {
   g_guest_clear_color.store(color, std::memory_order_relaxed);
   g_guest_clear_flags.store(flags, std::memory_order_relaxed);
   g_guest_clear_z.store(z, std::memory_order_relaxed);
+  g_guest_clear_stencil.store(stencil, std::memory_order_relaxed);
+  g_guest_clear_color_surface.store(color_surface, std::memory_order_relaxed);
+  g_guest_clear_depth_surface.store(depth_surface, std::memory_order_relaxed);
   g_guest_clear_pending.store(true, std::memory_order_release);
 }
 
@@ -1790,6 +1805,8 @@ void SetPendingResolveClear(const float rgba[4]) {
   }
   g_guest_clear_color.store(c, std::memory_order_relaxed);
   g_guest_clear_flags.store(0xFu, std::memory_order_relaxed);
+  g_guest_clear_color_surface.store(0, std::memory_order_relaxed);
+  g_guest_clear_depth_surface.store(0, std::memory_order_relaxed);
   g_guest_clear_pending.store(true, std::memory_order_release);
 }
 
@@ -1802,11 +1819,15 @@ bool TakeGuestClear(GuestClearRequest* out) {
   if (out) {
     out->color = (flags & 0xFu) != 0u;
     out->depth = (flags & 0x30u) != 0u;
+    out->flags = flags;
     out->rgba[0] = static_cast<float>((c >> 16) & 0xFFu) / 255.0f;
     out->rgba[1] = static_cast<float>((c >> 8) & 0xFFu) / 255.0f;
     out->rgba[2] = static_cast<float>(c & 0xFFu) / 255.0f;
     out->rgba[3] = static_cast<float>((c >> 24) & 0xFFu) / 255.0f;
     out->z = g_guest_clear_z.load(std::memory_order_relaxed);
+    out->stencil = static_cast<uint8_t>(g_guest_clear_stencil.load(std::memory_order_relaxed));
+    out->color_surface = g_guest_clear_color_surface.load(std::memory_order_relaxed);
+    out->depth_surface = g_guest_clear_depth_surface.load(std::memory_order_relaxed);
   }
   return true;
 }

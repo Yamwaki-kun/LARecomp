@@ -57,6 +57,7 @@
 #include "guest/guest_constants.h"
 #include "guest/guest_resources.h"
 #include "guest/guest_fence.h"
+#include "guest/render_state.h"
 #include "guest/texture_ownership.h"
 #include "guest/vblank_probe.h"
 #include "nocp/nocp_app.h"
@@ -101,11 +102,15 @@ REX_EXTERN(__imp__grcTextureXenon_dtor);
 //
 // Observed BEFORE the original: in no-CP mode the original writes a clear into
 // a command stream nothing consumes, so there is no ordering to preserve here.
+// The bound surfaces are read here too: the clear is consumed by the next draw,
+// and only they can tell whether that draw is on the surface being cleared.
 extern "C" REX_FUNC(rex_sub_824195E8) {
   mcla::native_gfx::nocp::NoteHook("rex_sub_824195E8");
   if (REXCVAR_GET(mcla_native_gfx)) {
+    const mcla::native_gfx::BoundSurfaces bound =
+        mcla::native_gfx::ReadBoundSurfaces(base, ctx.r3.u32);
     mcla::native_gfx::NoteGuestClear(ctx.r6.u32, ctx.r7.u32, static_cast<float>(ctx.f1.f64),
-                                     ctx.r9.u32);
+                                     ctx.r9.u32, bound.color0, bound.depth);
   }
   __imp__rex_sub_824195E8(ctx, base);
 }

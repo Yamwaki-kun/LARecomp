@@ -126,7 +126,13 @@ void NoteEndVertices(const uint8_t* base, uint32_t dev);
 // shadow -- the "lighting turns off at distance". The shadow driver's own
 // clear of that surface is 0xFF7F7F7F, i.e. exactly the 0.5 neutral its draws
 // write.
-void NoteGuestClear(uint32_t flags, uint32_t color, float z, uint32_t stencil);
+//
+// `color_surface` / `depth_surface` are the D3D surfaces bound when the clear
+// was issued (see ReadBoundSurfaces in guest/render_state.h): the request is
+// consumed by whichever draw comes next, and these say whether that draw is
+// still on the surface the guest cleared.
+void NoteGuestClear(uint32_t flags, uint32_t color, float z, uint32_t stencil,
+                    uint32_t color_surface, uint32_t depth_surface);
 
 // Consumes the last guest colour clear, if one arrived since the previous
 // call, writing it as linear RGBA. The pool's policy clear calls this so the
@@ -144,9 +150,15 @@ bool TakeGuestClearColor(float rgba[4]);
 // shader's 10/255 cut and turns every tree shadow into a square.
 struct GuestClearRequest {
   bool color = false;
-  bool depth = false;
+  bool depth = false;    // depth and/or stencil
+  uint32_t flags = 0;    // 0xF colour, 0x10 depth, 0x20 stencil
   float rgba[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   float z = 0.0f;
+  uint8_t stencil = 0;
+  // The surfaces bound at D3DDevice_Clear; both zero for a request armed by a
+  // clearing resolve (SetPendingResolveClear), which is colour only.
+  uint32_t color_surface = 0;
+  uint32_t depth_surface = 0;
 };
 bool TakeGuestClear(GuestClearRequest* out);
 

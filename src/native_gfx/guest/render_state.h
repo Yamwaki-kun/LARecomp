@@ -242,6 +242,20 @@ HostViewport ComputeHostViewport(const GuestRenderState& s);
 
 GuestRenderState ReadRenderState(const uint8_t* base, uint32_t dev);
 
+// The D3D surfaces the device has bound right now: colour target 0 and the
+// depth/stencil surface. These are what D3DDevice_Clear clears -- its worker,
+// sub_824194C0, takes the extent from dev+12440 (or dev+12456 when no colour
+// target is bound) and compares dev+12440..12456 against the device's cached
+// set -- so the pair names the guest surface a clear was meant for, which the
+// pooled host target (keyed by shape) cannot.
+inline constexpr uint32_t kDevColorSurface0 = 12440;
+inline constexpr uint32_t kDevDepthSurface = 12456;
+struct BoundSurfaces {
+  uint32_t color0 = 0;
+  uint32_t depth = 0;
+};
+BoundSurfaces ReadBoundSurfaces(const uint8_t* base, uint32_t dev);
+
 // The value SharedConstants.g_AlphaThreshold has to carry so the generated
 // pixel shader's `discard(alpha - threshold < 0)` -- i.e. keep alpha >= t --
 // reproduces the guest's (alpha_func, alpha_ref) pair as closely as one

@@ -28,6 +28,16 @@ inline uint32_t R32(const uint8_t* base, uint32_t ea) {
 
 }  // namespace
 
+BoundSurfaces ReadBoundSurfaces(const uint8_t* base, uint32_t dev) {
+  BoundSurfaces b;
+  if (!base || dev < 0x1000u) {
+    return b;
+  }
+  b.color0 = R32(base, dev + kDevColorSurface0);
+  b.depth = R32(base, dev + kDevDepthSurface);
+  return b;
+}
+
 GuestRenderState ReadRenderState(const uint8_t* base, uint32_t dev) {
   GuestRenderState s;
   if (!base || dev < 0x1000u) {
