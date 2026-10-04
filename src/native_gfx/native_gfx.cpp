@@ -9,6 +9,7 @@
 
 #include "native_gfx.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -18,6 +19,7 @@
 #include <vector>
 
 #include <rex/cvar.h>
+#include <rex/graphics/pipeline/texture/util.h>
 #include <rex/system/interfaces/graphics.h>
 #include <rex/hook.h>
 #include <rex/logging.h>
@@ -146,8 +148,11 @@ REXCVAR_DEFINE_BOOL(
     "CPU: it locks the front buffer, untiles it and JPEG-encodes it (sub_82178B20). On the "
     "console a resolve writes main memory; here the resolved image only exists as a GPU copy, so "
     "the CPU read zeros. When the guest locks a surface the GPU produced, this copies that "
-    "resolve back into guest memory at that moment, in the guest's own layout. Costs one GPU "
-    "wait per lock of such a surface and nothing otherwise. Off for A/B.")
+    "resolve back into guest memory at that moment, in the guest's own layout. Also fixes car "
+    "vinyls outside the Vinyl Editor: the vinyl compressor locks every mip level of the "
+    "composite render target and DXT-compresses it on the CPU, so a surface with a mip chain "
+    "gets its smaller levels as well, derived from level 0. Costs one GPU wait per lock of such "
+    "a surface and nothing otherwise. Off for A/B.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_BOOL(
@@ -1829,6 +1834,135 @@ void DumpLockWriteBack(uint32_t dest, const uint8_t* guest, uint64_t span, uint3
   WriteBgraTga(name, width, height, bgra.data());
 }
 
+// Stores `width` x `height` texels, given in the readback's own channel order,
+// into guest memory as a k_8_8_8_8 surface: channels placed per the fetch's
+// swizzle, the fetch's endian swap applied, tiled or linear. `pitch_bytes` is
+// the distance between rows -- for a tiled surface, the row pitch the guest
+// layout gives the level, whose tile-aligned width is what the swizzle uses.
+void StoreByte4Surface(uint8_t* guest, const uint8_t* texels, uint32_t width, uint32_t height,
+                       bool tiled, uint32_t pitch_bytes, const Byte4Layout& layout,
+                       const uint8_t src_index[4], uint32_t endianness) {
+  for (uint32_t y = 0; y < height; ++y) {
+    const uint8_t* row = texels + size_t(y) * width * 4u;
+    for (uint32_t x = 0; x < width; ++x) {
+      const uint8_t* px = row + size_t(x) * 4u;
+      const uint32_t v = uint32_t(px[src_index[layout.channel[0]]]) |
+                         (uint32_t(px[src_index[layout.channel[1]]]) << 8) |
+                         (uint32_t(px[src_index[layout.channel[2]]]) << 16) |
+                         (uint32_t(px[src_index[layout.channel[3]]]) << 24);
+      const uint32_t stored = SwapGuestEndian32(v, endianness);
+      const uint32_t offset =
+          tiled ? TiledOffset2D(x, y, pitch_bytes / 4u, 4u) : y * pitch_bytes + x * 4u;
+      std::memcpy(guest + offset, &stored, 4);
+    }
+  }
+}
+
+// Levels 1..n of a k_8_8_8_8 surface whose level 0 was just written back,
+// derived from it on the CPU.
+//
+// On the console these come from the GPU too: rage's GenerateMipMaps
+// (sub_82184588) draws each level from the one above with PSFastMipMap and
+// resolves it with DestLevel = level. Here no level past 0 has a copy
+// (NotifyResolve), yet the vinyl compressor (sub_8236F4F8) locks every level of
+// the composite, untiles it in place and DXT-compresses it -- the smaller levels
+// are what the car shows from a distance.
+//
+// PSFastMipMap is a 4x4 box over the level above, edges clamped: four bilinear
+// taps one texel off the centre of each 2x2 block. Fitted against the emulated
+// path with synchronous readback (readback_resolve=full), level 0 -> level 1 of
+// two composites: largest difference 1/255, 97.9% and 99.8% of texels exact. A
+// 2x2 box, the obvious guess, was off by more than 16 on up to 35% of them.
+//
+// Addresses and pitches come from the guest layout rules, the same arithmetic
+// the texture cache decodes mips with. A packed mip tail (several levels in one
+// block) stops the chain rather than be written to the wrong place; the
+// composites are 512x512 and 1024x1024 with no packed levels. Returns the
+// number of levels written.
+uint32_t WriteDerivedMipLevels(const TextureFetch& fetch, const std::vector<uint8_t>& level0,
+                               const Byte4Layout& layout, const uint8_t src_index[4]) {
+  namespace tu = rex::graphics::texture_util;
+  namespace xenos = rex::graphics::xenos;
+  const tu::TextureGuestLayout guest_layout = tu::GetGuestTextureLayout(
+      xenos::DataDimension::k2DOrStacked, fetch.pitch / 32u, fetch.width, fetch.height,
+      /*depth_or_array_size=*/1u, fetch.tiled, xenos::TextureFormat(fetch.format),
+      fetch.packed_mips, /*has_base=*/true, fetch.mip_max_level);
+  uint32_t last_level = std::min(fetch.mip_max_level, guest_layout.max_level);
+  last_level = std::min(last_level, uint32_t(xenos::kTextureMaxMips) - 1u);
+  if (guest_layout.packed_level != UINT32_MAX) {
+    if (guest_layout.packed_level <= 1u) {
+      return 0;
+    }
+    last_level = std::min(last_level, guest_layout.packed_level - 1u);
+  }
+  // The mip pointer carries the same page fixup as the base address.
+  const uint32_t raw = fetch.mip_address;
+  const uint32_t mip_base = (((raw >> 20) + 512u) & 0x1000u) + (raw & 0x1FFFFFFFu);
+
+  std::vector<uint8_t> buffers[2];
+  const std::vector<uint8_t>* above = &level0;
+  uint32_t above_w = fetch.width;
+  uint32_t above_h = fetch.height;
+  uint32_t written = 0;
+  for (uint32_t level = 1; level <= last_level; ++level) {
+    const uint32_t w = std::max(1u, fetch.width >> level);
+    const uint32_t h = std::max(1u, fetch.height >> level);
+    std::vector<uint8_t>& texels = buffers[level & 1u];
+    texels.resize(size_t(w) * h * 4u);
+    const auto clamp_to = [](int32_t v, uint32_t size) {
+      return uint32_t(std::clamp(v, 0, int32_t(size) - 1));
+    };
+    for (uint32_t y = 0; y < h; ++y) {
+      uint32_t rows[4];
+      for (int32_t j = 0; j < 4; ++j) {
+        rows[j] = clamp_to(int32_t(2u * y) - 1 + j, above_h);
+      }
+      for (uint32_t x = 0; x < w; ++x) {
+        uint32_t cols[4];
+        for (int32_t i = 0; i < 4; ++i) {
+          cols[i] = clamp_to(int32_t(2u * x) - 1 + i, above_w);
+        }
+        uint32_t sum[4] = {0, 0, 0, 0};
+        for (uint32_t j = 0; j < 4; ++j) {
+          const uint8_t* row = above->data() + size_t(rows[j]) * above_w * 4u;
+          for (uint32_t i = 0; i < 4; ++i) {
+            const uint8_t* px = row + size_t(cols[i]) * 4u;
+            for (uint32_t ch = 0; ch < 4; ++ch) {
+              sum[ch] += px[ch];
+            }
+          }
+        }
+        uint8_t* out = texels.data() + (size_t(y) * w + x) * 4u;
+        for (uint32_t ch = 0; ch < 4; ++ch) {
+          out[ch] = uint8_t((sum[ch] + 8u) / 16u);
+        }
+      }
+    }
+    const tu::TextureGuestLayout::Level& lv = guest_layout.mips[level];
+    const uint32_t address = mip_base + guest_layout.mip_offsets_bytes[level];
+    const uint32_t pitch_bytes = lv.row_pitch_bytes ? lv.row_pitch_bytes : w * 4u;
+    const uint64_t extent = fetch.tiled ? uint64_t(AlignToTile(pitch_bytes / 4u)) *
+                                              AlignToTile(h) * 4u
+                                        : uint64_t(pitch_bytes) * h;
+    if (!IsPhysicalRangeReadable(address, extent)) {
+      REXLOG_WARN("[native_gfx] lock write-back: mip level {} at {:#010x} ({} bytes) not mapped",
+                  level, address, extent);
+      break;
+    }
+    uint8_t* guest = const_cast<uint8_t*>(TranslatePhysicalGuest(address));
+    if (!guest) {
+      break;
+    }
+    StoreByte4Surface(guest, texels.data(), w, h, fetch.tiled, pitch_bytes, layout, src_index,
+                      fetch.endianness);
+    ++written;
+    above = &texels;
+    above_w = w;
+    above_h = h;
+  }
+  return written;
+}
+
 // The guest is about to read, with the CPU, a surface whose pixels only exist
 // on the GPU. On the console the resolve wrote them to main memory; here the
 // resolve only made a GPU copy (RenderTargetPool::NoteResolve), so guest
@@ -1836,6 +1970,11 @@ void DumpLockWriteBack(uint32_t dest, const uint8_t* guest, uint64_t span, uint3
 // the black photos. Copy that resolve into guest memory now, in the layout the
 // guest's own fetch constant describes. Nothing is armed ahead of time and no
 // resolve is read back speculatively: the lock IS the request.
+//
+// A surface with a mip chain gets its smaller levels as well, derived from
+// level 0 (WriteDerivedMipLevels), whichever level the lock is for: the vinyl
+// compressor locks level 0 first and then every other one, and only level 0
+// has a GPU copy here.
 void WriteBackGpuSurfaceForLock(const uint8_t* base, uint32_t resource_va) {
   if (!REXCVAR_GET(mcla_native_gfx_lock_writeback) || !base || resource_va < 0x1000u ||
       !IsGuestRangeReadable(resource_va, sizeof(D3DTexture))) {
@@ -1856,10 +1995,9 @@ void WriteBackGpuSurfaceForLock(const uint8_t* base, uint32_t resource_va) {
     d[i] = load_be32(resource_va + uint32_t(offsetof(D3DTexture, Format)) + 4u * i);
   }
   const TextureFetch fetch = DecodeTextureFetch(d);
-  // k_8_8_8_8, 2D, a single level: the front buffer. A surface with a mip
-  // chain would also need its smaller levels, which this does not produce.
-  if (!fetch.type_valid || fetch.format != 6u || fetch.dimension != 1u ||
-      fetch.mip_address != 0u || fetch.width == 0 || fetch.height == 0) {
+  // k_8_8_8_8, 2D: the front buffer, and the vinyl composite with its chain.
+  if (!fetch.type_valid || fetch.format != 6u || fetch.dimension != 1u || fetch.width == 0 ||
+      fetch.height == 0) {
     return;
   }
   const Byte4Layout layout = Byte4LayoutForSwizzle(fetch.swizzle);
@@ -1878,58 +2016,62 @@ void WriteBackGpuSurfaceForLock(const uint8_t* base, uint32_t resource_va) {
                                           AlignToTile(fetch.height) * 4u
                                     : uint64_t(pitch_bytes) * fetch.height;
 
-  RenderGateGuard gate;
-  // Only an address a resolve wrote with exactly this extent, and only once
-  // per resolve: a second lock finds guest memory already current.
-  if (!g_draw_ready || !g_render_targets.NeedsGuestWriteBack(dest, fetch.width, fetch.height)) {
-    return;
-  }
-  if (!IsPhysicalRangeReadable(dest, span)) {
-    REXLOG_WARN("[native_gfx] lock write-back {:#010x}: guest range of {} bytes not mapped", dest,
-                span);
-    return;
-  }
-  uint8_t* guest = const_cast<uint8_t*>(TranslatePhysicalGuest(dest));
-  if (!guest) {
-    return;
-  }
-  const auto t0 = std::chrono::steady_clock::now();
-  if (!FlushOpenDrawBatch(g_draw_context)) {
-    REXLOG_ERROR("[native_gfx] lock write-back {:#010x}: closing the open draw batch failed",
-                 dest);
-    return;
-  }
-  const auto t1 = std::chrono::steady_clock::now();
+  uint8_t* guest = nullptr;
   RenderTargetPool::CpuReadback rb;
-  if (!g_render_targets.ReadbackResolvedColor(g_draw_context, dest, fetch.width, fetch.height,
-                                              &rb)) {
-    REXLOG_WARN("[native_gfx] lock write-back {:#010x} {}x{}: no 8:8:8:8 resolve copy to read",
-                dest, fetch.width, fetch.height);
-    return;
+  std::chrono::steady_clock::time_point t0, t1, t2;
+  {
+    // The GPU side only: the pool, the open draw batch and the readback belong
+    // to the render thread. Once the pixels are on the CPU only guest memory is
+    // touched, and the gate is released so the render thread is not held while
+    // a 1024x1024 mip chain is derived (12 ms measured).
+    RenderGateGuard gate;
+    // Only an address a resolve wrote with exactly this extent, and only once
+    // per resolve: a second lock finds guest memory already current.
+    if (!g_draw_ready ||
+        !g_render_targets.NeedsGuestWriteBack(dest, fetch.width, fetch.height)) {
+      return;
+    }
+    if (!IsPhysicalRangeReadable(dest, span)) {
+      REXLOG_WARN("[native_gfx] lock write-back {:#010x}: guest range of {} bytes not mapped",
+                  dest, span);
+      return;
+    }
+    guest = const_cast<uint8_t*>(TranslatePhysicalGuest(dest));
+    if (!guest) {
+      return;
+    }
+    t0 = std::chrono::steady_clock::now();
+    if (!FlushOpenDrawBatch(g_draw_context)) {
+      REXLOG_ERROR("[native_gfx] lock write-back {:#010x}: closing the open draw batch failed",
+                   dest);
+      return;
+    }
+    t1 = std::chrono::steady_clock::now();
+    if (!g_render_targets.ReadbackResolvedColor(g_draw_context, dest, fetch.width, fetch.height,
+                                                &rb)) {
+      REXLOG_WARN("[native_gfx] lock write-back {:#010x} {}x{}: no 8:8:8:8 resolve copy to read",
+                  dest, fetch.width, fetch.height);
+      return;
+    }
+    t2 = std::chrono::steady_clock::now();
   }
-  const auto t2 = std::chrono::steady_clock::now();
 
   // Source channel positions in the copy's own format.
   const bool src_bgra = rb.dxgi_format == DXGI_FORMAT_B8G8R8A8_UNORM ||
                         rb.dxgi_format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
   const uint8_t src_index[4] = {uint8_t(src_bgra ? 2 : 0), 1, uint8_t(src_bgra ? 0 : 2), 3};
+  StoreByte4Surface(guest, rb.pixels.data(), fetch.width, fetch.height, fetch.tiled,
+                    fetch.tiled ? AlignToTile(fetch.width) * 4u : pitch_bytes, layout, src_index,
+                    fetch.endianness);
   uint64_t sum_rgb[3] = {0, 0, 0};
-  for (uint32_t y = 0; y < fetch.height; ++y) {
-    const uint8_t* row = rb.pixels.data() + size_t(y) * fetch.width * 4u;
-    for (uint32_t x = 0; x < fetch.width; ++x) {
-      const uint8_t* px = row + size_t(x) * 4u;
-      const uint32_t v = uint32_t(px[src_index[layout.channel[0]]]) |
-                         (uint32_t(px[src_index[layout.channel[1]]]) << 8) |
-                         (uint32_t(px[src_index[layout.channel[2]]]) << 16) |
-                         (uint32_t(px[src_index[layout.channel[3]]]) << 24);
-      const uint32_t stored = SwapGuestEndian32(v, fetch.endianness);
-      const uint32_t offset = fetch.tiled ? TiledOffset2D(x, y, fetch.width, 4u)
-                                          : y * pitch_bytes + x * 4u;
-      std::memcpy(guest + offset, &stored, 4);
-      sum_rgb[0] += px[src_index[0]];
-      sum_rgb[1] += px[src_index[1]];
-      sum_rgb[2] += px[src_index[2]];
-    }
+  for (size_t i = 0; i + 3 < rb.pixels.size(); i += 4) {
+    sum_rgb[0] += rb.pixels[i + src_index[0]];
+    sum_rgb[1] += rb.pixels[i + src_index[1]];
+    sum_rgb[2] += rb.pixels[i + src_index[2]];
+  }
+  uint32_t mip_levels = 0;
+  if (fetch.mip_address != 0 && fetch.mip_max_level != 0) {
+    mip_levels = WriteDerivedMipLevels(fetch, rb.pixels, layout, src_index);
   }
   const auto t3 = std::chrono::steady_clock::now();
 
@@ -1943,21 +2085,23 @@ void WriteBackGpuSurfaceForLock(const uint8_t* base, uint32_t resource_va) {
     DumpLockWriteBack(dest, guest, span, fetch.width, fetch.height, fetch.tiled, pitch_bytes,
                       guest_mean);
   }
-  // Rare by construction (one per photo), so every one is worth a line; the
-  // cap only protects the log if something starts locking a surface per frame.
+  // Rare by construction (one per photo, one per vinyl composite), so every one
+  // is worth a line; the cap only protects the log if something starts locking
+  // a surface per frame.
   if (n <= 64u || (n % 256u) == 0u) {
     const auto ms = [](auto a, auto b) {
       return std::chrono::duration<double, std::milli>(b - a).count();
     };
     REXLOG_INFO(
-        "[native_gfx] lock write-back #{}: {:#010x} {}x{} tiled={} endian={} swizzle={:#05x} "
-        "from {} copy (dxgi {}) | flush {:.2f} ms, readback {:.2f} ms, write {:.2f} ms | "
-        "thread {} (render {}) | copy mean rgb {:.1f} {:.1f} {:.1f} | guest view {:.1f} {:.1f} "
-        "{:.1f}",
-        n, dest, fetch.width, fetch.height, fetch.tiled ? 1 : 0, fetch.endianness, fetch.swizzle,
-        rb.from_variant ? "variant" : "newest", rb.dxgi_format, ms(t0, t1), ms(t1, t2), ms(t2, t3),
-        GetCurrentThreadId(), g_render_thread_id.load(std::memory_order_relaxed), copy_mean[0],
-        copy_mean[1], copy_mean[2], guest_mean[0], guest_mean[1], guest_mean[2]);
+        "[native_gfx] lock write-back #{}: {:#010x} {}x{} +{} mip level(s) tiled={} endian={} "
+        "swizzle={:#05x} from {} copy (dxgi {}) | flush {:.2f} ms, readback {:.2f} ms, write "
+        "{:.2f} ms | thread {} (render {}) | copy mean rgb {:.1f} {:.1f} {:.1f} | guest view "
+        "{:.1f} {:.1f} {:.1f}",
+        n, dest, fetch.width, fetch.height, mip_levels, fetch.tiled ? 1 : 0, fetch.endianness,
+        fetch.swizzle, rb.from_variant ? "variant" : "newest", rb.dxgi_format, ms(t0, t1),
+        ms(t1, t2), ms(t2, t3), GetCurrentThreadId(),
+        g_render_thread_id.load(std::memory_order_relaxed), copy_mean[0], copy_mean[1],
+        copy_mean[2], guest_mean[0], guest_mean[1], guest_mean[2]);
   }
 }
 
