@@ -599,6 +599,18 @@ void RenderTargetPool::LogTargetsForFormat(uint32_t rt_format, const char* why) 
   std::fclose(f);
 }
 
+std::string RenderTargetPool::DescribeTargetsForFormat(uint32_t rt_format) const {
+  std::string out;
+  char item[64];
+  for (const auto& [k, t] : targets_) {
+    if (k.rt_format != rt_format) continue;
+    std::snprintf(item, sizeof(item), "%ux%u/ds%u/s%u/p%u%s ", k.width, k.height, k.ds_format,
+                  k.sample_count, k.surface_pitch, t.cleared ? "*" : "");
+    out += item;
+  }
+  return out.empty() ? std::string("(none)") : out;
+}
+
 RenderTarget* RenderTargetPool::Find(const RenderTargetKey& key) {
   auto it = targets_.find(key);
   return it == targets_.end() ? nullptr : &it->second;

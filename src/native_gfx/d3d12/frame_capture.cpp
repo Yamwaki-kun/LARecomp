@@ -1322,6 +1322,21 @@ void Finish(D3D12Context& context, PipelineCache& pipelines, BufferCache& buffer
 
 bool FlushOpenDrawBatch(D3D12Context& context) { return FlushBatch(context); }
 
+std::string CaptureStateSummary() {
+  char line[512];
+  std::snprintf(line, sizeof(line),
+                "armed=%d started=%d offered=%u acc=%u aux=%u comp=%u | rej not_armed=%u "
+                "topology=%u no_shader=%u geometry=%u unsupplied=%u cfg_target=%u cfg_budget=%u "
+                "cfg_patho=%u shader_missing=%u unsup_display=%u | fail bind=%u pso=%u const=%u",
+                g_cap.armed ? 1 : 0, g_cap.started ? 1 : 0, g_cap.offered, g_cap.accepted,
+                g_cap.accepted_aux, g_cap.accepted_composite, g_cap.rej_not_armed,
+                g_cap.rej_topology, g_cap.rej_no_shader, g_cap.rej_geometry, g_cap.rej_unsupplied,
+                g_cap.rej_cfg_target, g_cap.rej_cfg_budget, g_cap.rej_cfg_patho,
+                g_cap.rej_shader_missing, g_cap.rej_unsup_display, g_cap.fail_bind,
+                g_cap.fail_pso, g_cap.fail_constants);
+  return line;
+}
+
 void NoteCommandListStateDisturbed() {
   if (SideListOpenOnThisThread()) {
     return;  // a pass on the side list leaves the main list's state alone

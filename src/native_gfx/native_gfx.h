@@ -56,7 +56,19 @@ void NotifyFrameBoundary();
 // D3DResource_Lock (sub_82421CA0), the funnel every lock reaches.
 // Observation only: the lock is where the guest waits on the resource fence,
 // which is the machinery a future ownership step has to take over.
-void NoteResourceLocked(const uint8_t* base, uint32_t resource_va);
+//
+// For a texture, D3DTexture_LockRectBody (sub_82410440) is the only caller and
+// passes the level in r6, the guest address of the locked region in r9 and its
+// length in r10 (r7/r8 are the base and mip pages); for vertex and index
+// buffers those registers mean something else and are ignored.
+void NoteResourceLocked(const uint8_t* base, uint32_t resource_va, uint32_t level = 0,
+                        uint32_t lock_address = 0, uint32_t lock_length = 0);
+
+// TEMP DIAG (mcla_native_gfx_lock_dump_level0): level 0 of a locked k_8_8_8_8
+// texture with a mip chain, untiled from guest memory into a TGA. Called from
+// the lock hook in BOTH renderers -- after the native write-back when it runs --
+// so the emulated path is the reference for the vinyl composite.
+void DumpLockedMippedTextureForDiag(const uint8_t* base, uint32_t resource_va, uint32_t level);
 
 // D3DResource_Unlock (sub_82421F38), BEFORE the original -- it resets the two
 // flush words it is read for and decrements the lock count.

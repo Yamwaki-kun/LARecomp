@@ -10,11 +10,14 @@
 #include "native_gfx.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <map>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -170,6 +173,21 @@ REXCVAR_DEFINE_BOOL(
     "TEMP DIAG for mcla_native_gfx_lock_writeback: after each write-back, read the guest memory "
     "back the way the photo grab does (untile, swap every dword, bytes 1..3 as R,G,B) and write "
     "it to native_gfx_lockwb_<address>.tga, plus the average colour in the log line.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_BOOL(
+    mcla_native_gfx_vinyl_diag, false, "MCLA/NativeGfx",
+    "TEMP DIAG: log every resolve into a texture with a mip chain (rage GenerateMipMaps "
+    "targets, the vinyl composite among them) with its DestLevel, source lookup and the "
+    "capture's draw tallies, and every lock of such a texture with its level.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_BOOL(
+    mcla_native_gfx_lock_dump_level0, false, "MCLA/NativeGfx",
+    "TEMP DIAG: when the CPU locks level 0 of a k_8_8_8_8 texture with a mip chain (the vinyl "
+    "composite), untile what guest memory holds at that moment into "
+    "lockdump_<renderer>_<address>_<size>_<n>.tga. Works in both renderers, so the emulated path "
+    "is the reference the native write-back is compared against.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_BOOL(mcla_native_gfx, false, "MCLA/NativeGfx",
@@ -1227,6 +1245,115 @@ void TryFirstDraw(const uint8_t* base, uint32_t dev, uint32_t primitive_type,
 // clear colour.
 constexpr uint32_t kClearOnlyResolveMaxDimension = 64u;
 
+namespace {
+
+// TEMP DIAG (mcla_native_gfx_vinyl_diag). Destinations of resolves into a
+// texture with a mip chain, so the lock side can recognise the same textures.
+std::array<std::atomic<uint32_t>, 16> g_mip_resolve_bases{};
+std::atomic<uint32_t> g_mip_resolve_base_next{0};
+std::atomic<uint32_t> g_mip_resolve_diag_lines{0};
+std::atomic<uint32_t> g_mip_lock_diag_lines{0};
+
+void LogMipResolveDiag(const char* outcome, const uint8_t* base, uint32_t dest,
+                       const TextureFetch& fetch, uint32_t dest_level, uint32_t flags,
+                       uint32_t source_rect, uint32_t dest_point, const RenderTargetKey* key,
+                       const RenderTarget* source) {
+  bool known = false;
+  for (const auto& b : g_mip_resolve_bases) {
+    if (b.load(std::memory_order_relaxed) == dest) {
+      known = true;
+      break;
+    }
+  }
+  if (!known) {
+    const uint32_t slot = g_mip_resolve_base_next.fetch_add(1, std::memory_order_relaxed) %
+                          uint32_t(g_mip_resolve_bases.size());
+    g_mip_resolve_bases[slot].store(dest, std::memory_order_relaxed);
+  }
+  // Per (destination, level, outcome), the first three: a target that
+  // generates its mips every frame would otherwise spend the whole budget
+  // before the vinyl composite ever runs.
+  {
+    static std::mutex m;
+    static std::map<uint64_t, uint32_t> seen;
+    const uint64_t sig = (uint64_t(dest) << 32) ^ (uint64_t(dest_level) << 8) ^
+                         uint64_t(uint8_t(outcome[0])) ^ (uint64_t(uint8_t(outcome[1])) << 16);
+    std::lock_guard lock(m);
+    if (++seen[sig] > 3u) {
+      return;
+    }
+  }
+  if (g_mip_resolve_diag_lines.fetch_add(1, std::memory_order_relaxed) >= 600u) {
+    return;
+  }
+  const auto rd = [&](uint32_t ea) -> int32_t {
+    if (ea < 0x1000u) return 0;
+    uint32_t v;
+    std::memcpy(&v, rex::memory::GuestPtr(const_cast<uint8_t*>(base), ea), 4);
+    return int32_t(__builtin_bswap32(v));
+  };
+  const uint32_t raw_mip = fetch.mip_address;
+  const uint32_t mip_fixed =
+      raw_mip ? (((raw_mip >> 20) + 512u) & 0x1000u) + (raw_mip & 0x1FFFFFFFu) : 0u;
+  REXLOG_INFO(
+      "[vinyl-diag] RESOLVE {} dest={:#010x} {}x{} fmt={} tiled={} packed={} mips={}..{} "
+      "mip={:#010x} level={} flags={:#x} rect=({},{}..{},{}) at ({},{}) | key {}x{} fmt={} ds={} "
+      "s={} p={} | source {} | {} | pool fmt: {}",
+      outcome, dest, fetch.width, fetch.height, fetch.format, fetch.tiled ? 1 : 0,
+      fetch.packed_mips ? 1 : 0, fetch.mip_min_level, fetch.mip_max_level, mip_fixed, dest_level,
+      flags, source_rect ? rd(source_rect) : -1, source_rect ? rd(source_rect + 4) : -1,
+      source_rect ? rd(source_rect + 8) : -1, source_rect ? rd(source_rect + 12) : -1,
+      dest_point ? rd(dest_point) : -1, dest_point ? rd(dest_point + 4) : -1,
+      key ? key->width : 0u, key ? key->height : 0u, key ? key->rt_format : 0u,
+      key ? key->ds_format : 0u, key ? key->sample_count : 0u, key ? key->surface_pitch : 0u,
+      source ? "found" : "none", CaptureStateSummary(),
+      key ? g_render_targets.DescribeTargetsForFormat(key->rt_format) : std::string("-"));
+}
+
+void LogMipLockDiag(const uint8_t* base, uint32_t resource_va, uint32_t level,
+                    uint32_t lock_address, uint32_t lock_length) {
+  if (resource_va < 0x1000u || !IsGuestRangeReadable(resource_va, sizeof(D3DTexture))) {
+    return;
+  }
+  const auto load_be32 = [&](uint32_t ea) {
+    uint32_t v;
+    std::memcpy(&v, rex::memory::GuestPtr(const_cast<uint8_t*>(base), ea), 4);
+    return __builtin_bswap32(v);
+  };
+  if ((load_be32(resource_va) & 0xFu) != kBaseTypeTexture) {
+    return;
+  }
+  uint32_t d[6];
+  for (uint32_t i = 0; i < 6; ++i) {
+    d[i] = load_be32(resource_va + uint32_t(offsetof(D3DTexture, Format)) + 4u * i);
+  }
+  const TextureFetch fetch = DecodeTextureFetch(d);
+  const uint32_t raw = fetch.base_address;
+  const uint32_t dest = (((raw >> 20) + 512u) & 0x1000u) + (raw & 0x1FFFFFFFu);
+  bool known = false;
+  for (const auto& b : g_mip_resolve_bases) {
+    if (b.load(std::memory_order_relaxed) == dest) {
+      known = true;
+      break;
+    }
+  }
+  if (!known || g_mip_lock_diag_lines.fetch_add(1, std::memory_order_relaxed) >= 300u) {
+    return;
+  }
+  const uint32_t lock_fixed =
+      lock_address ? (((lock_address >> 20) + 512u) & 0x1000u) + (lock_address & 0x1FFFFFFFu)
+                   : 0u;
+  REXLOG_INFO(
+      "[vinyl-diag] LOCK res={:#010x} base={:#010x} {}x{} fmt={} tiled={} packed={} mips={}..{} "
+      "level={} addr={:#010x} (fixed {:#010x}) len={:#x} | thread {} (render {})",
+      resource_va, dest, fetch.width, fetch.height, fetch.format, fetch.tiled ? 1 : 0,
+      fetch.packed_mips ? 1 : 0, fetch.mip_min_level, fetch.mip_max_level, level, lock_address,
+      lock_fixed, lock_length, GetCurrentThreadId(),
+      g_render_thread_id.load(std::memory_order_relaxed));
+}
+
+}  // namespace
+
 void NotifyResolve(const uint8_t* base, uint32_t dev, uint32_t flags, uint32_t dest_texture,
                    uint32_t source_rect, uint32_t dest_point, uint32_t clear_color_ptr,
                    uint32_t dest_level) {
@@ -1295,6 +1422,8 @@ void NotifyResolve(const uint8_t* base, uint32_t dev, uint32_t flags, uint32_t d
   // GPU-produced, and a colour target is invisible to a format-based test.
   NoteFrameCaptureResolve(dest, fetch.width, fetch.height, from_depth);
 
+  const bool vinyl_diag = REXCVAR_GET(mcla_native_gfx_vinyl_diag) &&
+                          (fetch.mip_address != 0 || dest_level != 0);
   // Render-to-texture into a surface with a mip chain: rage's GenerateMipMaps
   // targets (sub_82184588), the vinyl composite and the 512x256 HDR target at
   // 0x02FE2000 among them. Never the display or a post-process pass.
@@ -1306,6 +1435,10 @@ void NotifyResolve(const uint8_t* base, uint32_t dev, uint32_t flags, uint32_t d
   // whatever the guest was rendering into at this moment, so the render state
   // read here is the same state the draws of that pass used.
   if (!g_draw_ready) {
+    if (vinyl_diag) {
+      LogMipResolveDiag("NOT_READY", base, dest, fetch, dest_level, flags, source_rect, dest_point,
+                        nullptr, nullptr);
+    }
     return;
   }
   const GuestRenderState rs = ReadRenderState(base, dev);
@@ -1325,9 +1458,14 @@ void NotifyResolve(const uint8_t* base, uint32_t dev, uint32_t flags, uint32_t d
   // ask for one sample and miss the multisampled target.
   key.sample_count = PooledSampleCountForShape(key.rt_format, key.ds_format, key.width);
   if (key.rt_format == 0 || key.width == 0 || key.height == 0) {
+    if (vinyl_diag) {
+      LogMipResolveDiag("BAD_KEY", base, dest, fetch, dest_level, flags, source_rect, dest_point,
+                        &key, nullptr);
+    }
     return;
   }
   RenderTarget* source = g_render_targets.Find(key);
+  const bool found_exact = source != nullptr;
   // Same shape, different colour format. MCLA has two 320x180 post-process
   // passes -- HDR (rt_format 10) and LDR (28) -- and the key built here takes
   // rs.color_format, so the LDR resolve misses a pool that only rendered the HDR
@@ -1410,6 +1548,10 @@ void NotifyResolve(const uint8_t* base, uint32_t dev, uint32_t flags, uint32_t d
   // lock derives the smaller levels from it (WriteBackGpuSurfaceForLock). Past
   // the clear it asked for, applied above, there is nothing to register.
   if (level_resolve) {
+    if (vinyl_diag) {
+      LogMipResolveDiag(source ? "LEVEL" : "LEVEL_NOSRC", base, dest, fetch, dest_level, flags,
+                        source_rect, dest_point, &key, source);
+    }
     return;
   }
   if (!source && !from_depth && REXCVAR_GET(mcla_native_gfx_clear_only_resolve)) {
@@ -1524,6 +1666,10 @@ void NotifyResolve(const uint8_t* base, uint32_t dev, uint32_t flags, uint32_t d
     }
     NoteFrameCaptureResolveMiss(dest, fetch.width, fetch.height, key.width, key.height,
                                 key.rt_format, key.ds_format);
+    if (vinyl_diag) {
+      LogMipResolveDiag("MISS", base, dest, fetch, dest_level, flags, source_rect, dest_point,
+                        &key, nullptr);
+    }
     return;
   }
   // The destination is not simply "this target": the shadow map resolves each
@@ -1588,6 +1734,10 @@ void NotifyResolve(const uint8_t* base, uint32_t dev, uint32_t flags, uint32_t d
     }
   }
   g_render_targets.NoteDestination(dest, fetch.width, fetch.height, dest_bytes);
+  if (vinyl_diag) {
+    LogMipResolveDiag(found_exact ? "OK" : "OK_FALLBACK", base, dest, fetch, dest_level, flags,
+                      source_rect, dest_point, &key, source);
+  }
 }
 
 void NoteGuestDraw(int kind) { NoteFrameCaptureGuestDraw(kind); }
@@ -2107,8 +2257,117 @@ void WriteBackGpuSurfaceForLock(const uint8_t* base, uint32_t resource_va) {
 
 }  // namespace
 
-void NoteResourceLocked(const uint8_t* base, uint32_t resource_va) {
+void DumpLockedMippedTextureForDiag(const uint8_t* base, uint32_t resource_va, uint32_t level) {
+  if (!REXCVAR_GET(mcla_native_gfx_lock_dump_level0) || level > 1u || !base ||
+      resource_va < 0x1000u || !IsGuestRangeReadable(resource_va, sizeof(D3DTexture))) {
+    return;
+  }
+  const auto load_be32 = [&](uint32_t ea) {
+    uint32_t v;
+    std::memcpy(&v, rex::memory::GuestPtr(const_cast<uint8_t*>(base), ea), 4);
+    return __builtin_bswap32(v);
+  };
+  if ((load_be32(resource_va) & 0xFu) != kBaseTypeTexture) {
+    return;
+  }
+  uint32_t d[6];
+  for (uint32_t i = 0; i < 6; ++i) {
+    d[i] = load_be32(resource_va + uint32_t(offsetof(D3DTexture, Format)) + 4u * i);
+  }
+  const TextureFetch fetch = DecodeTextureFetch(d);
+  if (!fetch.type_valid || fetch.format != 6u || fetch.dimension != 1u || fetch.width < 256u ||
+      fetch.height < 256u || fetch.mip_address == 0 || fetch.mip_max_level == 0) {
+    return;
+  }
+  const Byte4Layout layout = Byte4LayoutForSwizzle(fetch.swizzle);
+  if (!layout.valid) {
+    return;
+  }
+  // Level 0 at the base; level 1 at the mip pointer plus its layout offset,
+  // to compare the native CPU-derived level against the GPU's PSFastMipMap.
+  uint32_t addr = 0;
+  uint32_t width = fetch.width;
+  uint32_t height = fetch.height;
+  uint32_t pitch_bytes = (fetch.pitch ? fetch.pitch : fetch.width) * 4u;
+  if (level == 0) {
+    const uint32_t raw = fetch.base_address;
+    addr = (((raw >> 20) + 512u) & 0x1000u) + (raw & 0x1FFFFFFFu);
+  } else {
+    namespace tu = rex::graphics::texture_util;
+    namespace xenos = rex::graphics::xenos;
+    const tu::TextureGuestLayout gl = tu::GetGuestTextureLayout(
+        xenos::DataDimension::k2DOrStacked, fetch.pitch / 32u, fetch.width, fetch.height, 1u,
+        fetch.tiled, xenos::TextureFormat(fetch.format), fetch.packed_mips, true,
+        fetch.mip_max_level);
+    if (gl.packed_level != UINT32_MAX && gl.packed_level <= 1u) {
+      return;
+    }
+    const uint32_t raw = fetch.mip_address;
+    addr = (((raw >> 20) + 512u) & 0x1000u) + (raw & 0x1FFFFFFFu) + gl.mip_offsets_bytes[1];
+    width = std::max(1u, fetch.width >> 1);
+    height = std::max(1u, fetch.height >> 1);
+    pitch_bytes = gl.mips[1].row_pitch_bytes ? gl.mips[1].row_pitch_bytes : width * 4u;
+  }
+  const uint64_t span = fetch.tiled ? uint64_t(AlignToTile(pitch_bytes / 4u)) *
+                                          AlignToTile(height) * 4u
+                                    : uint64_t(pitch_bytes) * height;
+  if (!IsPhysicalRangeReadable(addr, span)) {
+    return;
+  }
+  const uint8_t* src = TranslatePhysicalGuest(addr);
+  if (!src) {
+    return;
+  }
+  std::vector<uint8_t> linear(size_t(width) * height * 4u);
+  if (fetch.tiled) {
+    UntileSurface2D(linear.data(), width * 4u, src, span, pitch_bytes / 4u, height, 4u);
+  } else {
+    for (uint32_t y = 0; y < height; ++y) {
+      std::memcpy(linear.data() + size_t(y) * width * 4u, src + size_t(y) * pitch_bytes,
+                  size_t(width) * 4u);
+    }
+  }
+  std::vector<uint8_t> bgra(linear.size());
+  uint64_t sum[4] = {0, 0, 0, 0};
+  uint64_t covered = 0;
+  for (size_t i = 0; i < linear.size(); i += 4) {
+    uint32_t v;
+    std::memcpy(&v, linear.data() + i, 4);
+    v = SwapGuestEndian32(v, fetch.endianness);
+    uint8_t rgba[4] = {0, 0, 0, 0};
+    for (uint32_t k = 0; k < 4; ++k) {
+      rgba[layout.channel[k]] = uint8_t(v >> (8u * k));
+    }
+    bgra[i + 0] = rgba[2];
+    bgra[i + 1] = rgba[1];
+    bgra[i + 2] = rgba[0];
+    bgra[i + 3] = rgba[3];
+    for (uint32_t c = 0; c < 4; ++c) {
+      sum[c] += rgba[c];
+    }
+    covered += rgba[3] != 0 ? 1u : 0u;
+  }
+  static std::atomic<uint32_t> seq{0};
+  const uint32_t n = seq.fetch_add(1, std::memory_order_relaxed) + 1;
+  char name[96];
+  std::snprintf(name, sizeof(name), "lockdump_%s_%08X_%ux%u_L%u_%03u.tga",
+                REXCVAR_GET(mcla_native_gfx) ? "native" : "emulated", addr, width, height, level,
+                n);
+  WriteBgraTga(name, width, height, bgra.data());
+  const double texels = double(width) * height;
+  REXLOG_INFO(
+      "[vinyl-diag] level{} dump #{} {:#010x} {}x{} endian={} swizzle={:#05x} | mean rgba {:.1f} "
+      "{:.1f} {:.1f} {:.1f} | alpha>0 on {:.1f}% -> {}",
+      level, n, addr, width, height, fetch.endianness, fetch.swizzle, sum[0] / texels,
+      sum[1] / texels, sum[2] / texels, sum[3] / texels, 100.0 * double(covered) / texels, name);
+}
+
+void NoteResourceLocked(const uint8_t* base, uint32_t resource_va, uint32_t level,
+                        uint32_t lock_address, uint32_t lock_length) {
   NoteResourceLock(base, resource_va);
+  if (REXCVAR_GET(mcla_native_gfx_vinyl_diag)) {
+    LogMipLockDiag(base, resource_va, level, lock_address, lock_length);
+  }
   WriteBackGpuSurfaceForLock(base, resource_va);
 }
 

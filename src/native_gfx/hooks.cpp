@@ -262,7 +262,8 @@ extern "C" REX_FUNC(D3DDevice_CreateTexture) {
 extern "C" REX_FUNC(D3DResource_Lock) {
   mcla::native_gfx::nocp::NoteHook("D3DResource_Lock");
   if (REXCVAR_GET(mcla_native_gfx)) {
-    mcla::native_gfx::NoteResourceLocked(base, ctx.r3.u32);
+    mcla::native_gfx::NoteResourceLocked(base, ctx.r3.u32, ctx.r6.u32, ctx.r9.u32,
+                                         ctx.r10.u32);
     // TEMP DIAG (LOCKADDR): which guest addresses the CPU actually locks. The
     // native runtime keeps a resolve on the GPU and bridges it by address; it
     // never writes the pixels back into guest memory, the way the emulated path
@@ -299,6 +300,8 @@ extern "C" REX_FUNC(D3DResource_Lock) {
       }
     }
   }
+  // TEMP DIAG: level 0 of a locked mipped k_8_8_8_8 texture, in either renderer.
+  mcla::native_gfx::DumpLockedMippedTextureForDiag(base, ctx.r3.u32, ctx.r6.u32);
   __imp__D3DResource_Lock(ctx, base);
 }
 

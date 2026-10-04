@@ -78,6 +78,11 @@ void* GetContinuousDisplayResource(uint32_t* srv_format, uint32_t* width, uint32
 // second list while one is. The next draw simply opens a new batch.
 bool FlushOpenDrawBatch(D3D12Context& context);
 
+// TEMP DIAG (mcla_native_gfx_vinyl_diag): the capture's arming state and its
+// session draw tallies on one line, so a resolve that finds no source can be
+// lined up against what happened to the draws before it.
+std::string CaptureStateSummary();
+
 // Offers one guest draw to the capture. Ignores draws that do not match the
 // established render target configuration.
 void CaptureDraw(const uint8_t* base, uint32_t dev, uint32_t primitive_type,

@@ -38,6 +38,7 @@
 #include <filesystem>
 #include <map>
 #include <mutex>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -215,6 +216,9 @@ class RenderTargetPool : public RenderTargetLookup {
   // file. A resolve that misses says nothing on its own -- the question is
   // whether the image it wanted is sitting in the pool under another shape.
   void LogTargetsForFormat(uint32_t rt_format, const char* why);
+  // TEMP DIAG (mcla_native_gfx_vinyl_diag): the same list, as a string for the
+  // main log -- LogTargetsForFormat stops after 40 lines per process.
+  std::string DescribeTargetsForFormat(uint32_t rt_format) const;
 
   // Marks every pooled target as un-cleared so the next frame re-clears it on
   // its first draw. Continuous mode re-renders the whole scene each frame; the
