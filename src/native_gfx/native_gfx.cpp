@@ -1290,6 +1290,10 @@ void NotifyResolve(const uint8_t* base, uint32_t dev, uint32_t flags, uint32_t d
   // GPU-produced, and a colour target is invisible to a format-based test.
   NoteFrameCaptureResolve(dest, fetch.width, fetch.height, from_depth);
 
+  // Render-to-texture into a surface with a mip chain: rage's GenerateMipMaps
+  // targets (sub_82184588), the vinyl composite and the 512x256 HDR target at
+  // 0x02FE2000 among them. Never the display or a post-process pass.
+  const bool mipped_destination = fetch.mip_address != 0 && fetch.mip_max_level != 0;
   // A copy into mip level N > 0 of the destination rather than level 0.
   const bool level_resolve = dest_level != 0;
 
@@ -1428,12 +1432,20 @@ void NotifyResolve(const uint8_t* base, uint32_t dev, uint32_t flags, uint32_t d
     //   * the fetch, the viewport key and the resolve rect all agree;
     //   * the surface is small. A full-screen miss is a real dropped pass and
     //     must keep reporting itself, not be papered over with a clear.
+    //
+    // Or, in place of the last one, the destination carries a mip chain. That
+    // is render-to-texture, never the display or a post-process pass, and the
+    // vinyl composite is exactly this case at 512x512 and 1024x1024: before any
+    // layer is drawn it clears the surface and resolves it with no draw at all
+    // (sub_8236D7F0), and a surface with no layers composites to nothing but
+    // that clear. Dropped, the composite kept whatever an earlier car left at
+    // 0x050A0000 and the compressor would have baked it into this car.
     const bool shape_agrees = key.width == fetch.width && key.height == fetch.height;
     // NOT named `small`: rpcndr.h, pulled in through the Windows headers,
     // #defines that to `char`.
     const bool is_small = key.width <= kClearOnlyResolveMaxDimension &&
                           key.height <= kClearOnlyResolveMaxDimension;
-    if (shape_agrees && is_small) {
+    if (shape_agrees && (is_small || mipped_destination)) {
       GuestClearRequest clear;
       if (TakeGuestClear(&clear) && clear.color) {
         RenderTarget* created = g_render_targets.Acquire(g_draw_context, key, clear.z);
