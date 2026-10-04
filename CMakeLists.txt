@@ -45,6 +45,7 @@ set(LARECOMP_SOURCES
     src/mc_engine/hooks/mods.cpp
     src/mc_engine/hooks/discord.cpp
     src/mc_engine/hooks/diagnostics.cpp
+    src/mc_engine/hooks/warper.cpp
 
     src/mc_engine/guest_profiler.cpp
     src/mc_engine/carbon_parts.cpp
