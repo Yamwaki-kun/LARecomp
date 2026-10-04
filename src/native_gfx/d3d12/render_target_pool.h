@@ -127,8 +127,9 @@ struct RenderTarget {
   uint32_t rtv_descriptor_size = 0;
   // A pass the guest only CLEARED and then resolved, with no draws. Nothing
   // calls PrepareForRendering for such a pass, so the colour surface would be
-  // copied out undefined; FlushPendingCopies performs this clear itself right
-  // before the copy. See RequestClearOnlyFill.
+  // copied out undefined. NoteResolve hands it to the copy it queues, and
+  // FlushPendingCopies performs this clear itself right before that copy. See
+  // RequestClearOnlyFill.
   bool pending_guest_clear = false;
   float pending_clear_rgba[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   bool cleared = false;  // cleared once, then accumulated into
@@ -475,6 +476,12 @@ class RenderTargetPool : public RenderTargetLookup {
     ResolveRegion region;
     bool from_depth = false;
     uint32_t color_index = 0;
+    // The clear-only fill, carried by the copy it belongs to rather than by the
+    // target: two clear-only passes of one shape share one pooled target, and
+    // with the colour kept on the target the second request overwrote the
+    // first before the flush, so both copies took the second colour.
+    bool fill = false;
+    float fill_rgba[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   };
   std::vector<PendingCopy> pending_copies_;
   // Resolve-destination resources retired when the guest reuses a destination

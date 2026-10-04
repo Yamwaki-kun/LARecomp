@@ -789,7 +789,17 @@ void RenderTargetPool::NoteResolve(RenderTarget& source, bool from_depth,
   // A resolve must not submit work (hundreds per frame, on the queue shared
   // with the Xenia command processor), so the copy is queued and issued on the
   // next draw's command list.
-  pending_copies_.push_back(PendingCopy{&source, dest_address, region, from_depth, color_index});
+  PendingCopy copy{&source, dest_address, region, from_depth, color_index};
+  // A clear-only fill armed for this resolve leaves the target with the copy.
+  // MCLA resolves two 8x8 clear-only passes back to back into one pooled
+  // target (the fake shadow collectors, white then 0xFF7F7F7F); left on the
+  // target, the grey request replaced the white one before either copy ran.
+  if (!from_depth && source.pending_guest_clear) {
+    copy.fill = true;
+    std::memcpy(copy.fill_rgba, source.pending_clear_rgba, sizeof(copy.fill_rgba));
+    source.pending_guest_clear = false;
+  }
+  pending_copies_.push_back(copy);
 }
 
 // CopyTextureRegion refuses a multisampled source outright, and every guest
@@ -1585,18 +1595,17 @@ void RenderTargetPool::FlushPendingCopies(D3D12Context& context,
     if (from_color1 && pc.source->key.sample_count > 1) {
       continue;
     }
-    // Clear-only pass: fill the surface here, because no draw ever will. Colour
-    // only -- a depth resolve of a pass with no draws has nothing to say.
-    if (pc.source->pending_guest_clear && !pc.from_depth && pc.source->color &&
-        pc.source->rtv_heap) {
+    // Clear-only pass: fill the surface here, because no draw ever will, with
+    // the colour THIS resolve's pass was cleared to. Colour only -- a depth
+    // resolve of a pass with no draws has nothing to say.
+    if (pc.fill && !pc.from_depth && pc.source->color && pc.source->rtv_heap) {
       if (pc.source->color_state != D3D12_RESOURCE_STATE_RENDER_TARGET) {
         BarrierBatch::Transition(cl, pc.source->color.Get(), pc.source->color_state,
                                  D3D12_RESOURCE_STATE_RENDER_TARGET);
         pc.source->color_state = D3D12_RESOURCE_STATE_RENDER_TARGET;
       }
       cl->ClearRenderTargetView(pc.source->rtv_heap->GetCPUDescriptorHandleForHeapStart(),
-                                pc.source->pending_clear_rgba, 0, nullptr);
-      pc.source->pending_guest_clear = false;
+                                pc.fill_rgba, 0, nullptr);
     }
     if (pc.source->key.sample_count > 1) {
       ID3D12Resource* scratch = ResolveMsaaToScratch(context, cl, *pc.source, pc.from_depth,
