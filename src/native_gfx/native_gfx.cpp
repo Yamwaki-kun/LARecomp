@@ -366,6 +366,12 @@ REXCVAR_DEFINE_BOOL(mcla_native_gfx_reclear_depth, true, "MCLA/NativeGfx",
                     "tested against whatever an earlier pass of the same shape left in the "
                     "pooled depth buffer -- the Rate My Ride leaderboard lost everything below "
                     "the garage floor's depth. Off restores colour-only re-clears, for A/B.");
+REXCVAR_DEFINE_UINT32(mcla_native_gfx_reclear_depth_probe, 0, "MCLA/NativeGfx",
+                      "TEMP DIAG: log depth/stencil-only guest clears that reach an "
+                      "already-cleared target (applied or not, and why) to native_gfx_diag.txt, "
+                      "one line per distinct case (target shape, shader, flags, decision) up to "
+                      "N cases, repeated at counts 10, 100, 1000... 0 = off.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_BOOL(mcla_native_gfx_dumprt, false, "MCLA/NativeGfx",
                     "Diagnostic: write every large resolve destination to a .tga at the end "

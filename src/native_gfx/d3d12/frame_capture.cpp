@@ -18,6 +18,7 @@
 #include <string>
 #include <filesystem>
 #include <algorithm>
+#include <map>
 #include <set>
 #include <vector>
 
@@ -227,6 +228,7 @@ REXCVAR_DECLARE(bool, mcla_native_gfx_alpha_ref);
 REXCVAR_DECLARE(bool, mcla_native_gfx_guest_clear);
 REXCVAR_DECLARE(bool, mcla_native_gfx_reclear);
 REXCVAR_DECLARE(bool, mcla_native_gfx_reclear_depth);
+REXCVAR_DECLARE(uint32_t, mcla_native_gfx_reclear_depth_probe);
 REXCVAR_DECLARE(bool, mcla_native_gfx_skip_punch);
 REXCVAR_DECLARE(uint32_t, mcla_native_gfx_skip_water);
 REXCVAR_DECLARE(uint32_t, mcla_native_gfx_msaa);
@@ -4202,6 +4204,43 @@ static void CaptureDrawImpl(const uint8_t* base, uint32_t dev, uint32_t primitiv
         }
         cl->ClearDepthStencilView(dsv, ds_flags, target->clear_depth, guest_clear.stencil, 1,
                                   &rect);
+      }
+      // TEMP DIAG (RECLEARZ): one line per distinct case, so a whole session can
+      // show where these land -- above all, that none of them is mid-pass on the
+      // anchor. `total` counts every decision, `case_n` the ones of this kind.
+      static std::map<uint64_t, uint32_t> probe_cases;
+      static uint32_t probe_total = 0;
+      ++probe_total;
+      if (REXCVAR_GET(mcla_native_gfx_reclear_depth_probe) != 0u) {
+        const bool on_anchor = g_cap.has_anchor && cfg == g_cap.config;
+        const uint64_t sig = ps_id ^ (uint64_t(target->key.width) << 52) ^
+                             (uint64_t(target->key.height) << 40) ^
+                             (uint64_t(target->key.rt_format) << 32) ^
+                             (uint64_t(target->key.sample_count) << 28) ^
+                             (uint64_t(guest_clear.flags) << 20) ^ (apply ? 1ull : 0ull) ^
+                             (same_surfaces ? 2ull : 0ull) ^ (on_anchor ? 4ull : 0ull);
+        uint32_t& case_n = probe_cases[sig];
+        ++case_n;
+        // Every new case, then each one again at 1, 10, 100, 1000... so the
+        // counts of the frequent ones stay visible without a line per frame.
+        const bool decade = case_n == 1u || case_n == 10u || case_n == 100u ||
+                            case_n == 1000u || case_n == 10000u || case_n == 100000u;
+        if (decade && probe_cases.size() <= REXCVAR_GET(mcla_native_gfx_reclear_depth_probe)) {
+          if (FILE* f = std::fopen("native_gfx_diag.txt", "ab")) {
+            std::fprintf(f,
+                         "RECLEARZ total=%u case_n=%u %s draw=%u %ux%u rt=%u ds=%u s=%u "
+                         "anchor=%d flags=0x%X rect=(%ld,%ld..%ld,%ld) surf clear=%08X/%08X "
+                         "now=%08X/%08X own_depth=%d ps=%016llX\n",
+                         probe_total, case_n, apply ? "APPLIED" : "skipped", g_cap.offered,
+                         target->key.width, target->key.height, target->key.rt_format,
+                         target->key.ds_format, target->key.sample_count, on_anchor ? 1 : 0,
+                         guest_clear.flags, long(rect.left), long(rect.top), long(rect.right),
+                         long(rect.bottom), guest_clear.color_surface, guest_clear.depth_surface,
+                         now.color0, now.depth, samples_own_depth ? 1 : 0,
+                         (unsigned long long)ps_id);
+            std::fclose(f);
+          }
+        }
       }
     }
   }
