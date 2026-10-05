@@ -68,6 +68,42 @@ CounterAccum g_ctr{};
 
 #define CTR(field) static_cast<unsigned long long>(g_ctr.field)
 
+// The GPU timing counters are the fork's SDK's: the stock SDK's CounterId has
+// none of them, and there these columns of the log stay 0. A template on the
+// enum so the names are only looked up on an SDK that has them.
+template <typename Id, typename AddDelta>
+static void AddGpuTimingDeltas(AddDelta&& add_delta) {
+    if constexpr (requires {
+                      Id::kGpuSubmitTimeUs;
+                      Id::kGpuDrawTimeUs;
+                      Id::kGpuFenceWaitTimeUs;
+                      Id::kGpuResolveTimeUs;
+                      Id::kGpuPipelineTimeUs;
+                      Id::kGpuPipelineCreateTimeUs;
+                      Id::kGpuPipelineCreateCount;
+                      Id::kGpuTextureUploadTimeUs;
+                      Id::kGpuTextureUploadCount;
+                      Id::kGpuWaitRegMemTimeUs;
+                      Id::kGpuWaitRegMemCount;
+                      Id::kGpuCommandWaitTimeUs;
+                  }) {
+        add_delta(g_ctr.gpu_submit_us,          Id::kGpuSubmitTimeUs);
+        add_delta(g_ctr.gpu_draw_us,            Id::kGpuDrawTimeUs);
+        add_delta(g_ctr.gpu_fencewait_us,       Id::kGpuFenceWaitTimeUs);
+        add_delta(g_ctr.gpu_resolve_us,         Id::kGpuResolveTimeUs);
+        add_delta(g_ctr.gpu_pipeline_us,        Id::kGpuPipelineTimeUs);
+        add_delta(g_ctr.gpu_pipeline_create_us, Id::kGpuPipelineCreateTimeUs);
+        add_delta(g_ctr.gpu_pipeline_create_n,  Id::kGpuPipelineCreateCount);
+        add_delta(g_ctr.gpu_texupload_us,       Id::kGpuTextureUploadTimeUs);
+        add_delta(g_ctr.gpu_texupload_n,        Id::kGpuTextureUploadCount);
+        // The guest CPU blocking on the GPU. If frame time is unaccounted for and
+        // nothing is being drawn, this is where to look first.
+        add_delta(g_ctr.gpu_waitregmem_us,      Id::kGpuWaitRegMemTimeUs);
+        add_delta(g_ctr.gpu_waitregmem_n,       Id::kGpuWaitRegMemCount);
+        add_delta(g_ctr.gpu_cmdwait_us,         Id::kGpuCommandWaitTimeUs);
+    }
+}
+
 void SampleCounters() {
     using rex::perf::CounterId;
     using rex::perf::GetCounter;
@@ -100,20 +136,7 @@ void SampleCounters() {
         }
     };
 
-    add_delta(g_ctr.gpu_submit_us,          CounterId::kGpuSubmitTimeUs);
-    add_delta(g_ctr.gpu_draw_us,            CounterId::kGpuDrawTimeUs);
-    add_delta(g_ctr.gpu_fencewait_us,       CounterId::kGpuFenceWaitTimeUs);
-    add_delta(g_ctr.gpu_resolve_us,         CounterId::kGpuResolveTimeUs);
-    add_delta(g_ctr.gpu_pipeline_us,        CounterId::kGpuPipelineTimeUs);
-    add_delta(g_ctr.gpu_pipeline_create_us, CounterId::kGpuPipelineCreateTimeUs);
-    add_delta(g_ctr.gpu_pipeline_create_n,  CounterId::kGpuPipelineCreateCount);
-    add_delta(g_ctr.gpu_texupload_us,       CounterId::kGpuTextureUploadTimeUs);
-    add_delta(g_ctr.gpu_texupload_n,        CounterId::kGpuTextureUploadCount);
-    // The guest CPU blocking on the GPU. If frame time is unaccounted for and
-    // nothing is being drawn, this is where to look first.
-    add_delta(g_ctr.gpu_waitregmem_us,      CounterId::kGpuWaitRegMemTimeUs);
-    add_delta(g_ctr.gpu_waitregmem_n,       CounterId::kGpuWaitRegMemCount);
-    add_delta(g_ctr.gpu_cmdwait_us,         CounterId::kGpuCommandWaitTimeUs);
+    AddGpuTimingDeltas<CounterId>(add_delta);
     // Raw guest CPU churn: a collapse with flat GPU counters and a rising
     // dispatch count is guest code, not the emulator.
     add_delta(g_ctr.dispatched,             CounterId::kFunctionsDispatched);
