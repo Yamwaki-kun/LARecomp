@@ -52,6 +52,7 @@ set(LARECOMP_SOURCES
     src/mc_engine/graphics_button.cpp
     src/mc_engine/pause_menu.cpp
     src/mc_engine/string_table.cpp
+    src/mc_engine/string_dumper.cpp
     src/mc_engine/menu_camera.cpp
     src/mc_engine/map_mouse.cpp
     src/mc_engine/camera_look.cpp

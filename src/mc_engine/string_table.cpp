@@ -10,12 +10,47 @@
 #include <string_view>
 #include <thread>
 
+#include <memory>
+#include <mutex>
+
 #include <rex/cvar.h>
 #include <rex/runtime.h>
+
+#include "string_dumper.h"
+
+// The fork's SDK keeps its own dumper in KernelState, fed by its kernel string
+// exports as well. Use that one there: two dumpers flushing the same
+// dump/strings.toml would race and drop entries. The stock SDK has none, so
+// larecomp owns the store (string_dumper.h) and creates it on first use.
+#if __has_include(<rex/system/string_dumper.h>)
 #include <rex/system/kernel_state.h>
 #include <rex/system/string_dumper.h>
+#define LARECOMP_SDK_HAS_STRING_DUMPER 1
+#endif
 
 namespace {
+
+#if defined(LARECOMP_SDK_HAS_STRING_DUMPER)
+using Dumper = rex::system::StringDumper;
+
+Dumper* ActiveDumper() {
+    auto* ks = rex::system::kernel_state();
+    return ks ? &ks->string_dumper() : nullptr;
+}
+#else
+using Dumper = mc::strings::StringDumper;
+
+Dumper* ActiveDumper() {
+    static std::once_flag once;
+    static std::unique_ptr<Dumper> dumper;
+    std::call_once(once, [] {
+        if (auto* rt = rex::Runtime::instance()) {
+            dumper = std::make_unique<Dumper>(mc::strings::DefaultStringsDir(rt->game_data_root()));
+        }
+    });
+    return dumper.get();
+}
+#endif
 
 constexpr uint32_t kStringTableGlobal = 0x8286D7FC;
 
@@ -41,8 +76,7 @@ struct ScanStats {
     uint32_t skipped = 0;
 };
 
-ScanStats ScanHashMap(uint8_t* base, uint32_t hashmap_ea,
-                      rex::system::StringDumper& dumper,
+ScanStats ScanHashMap(uint8_t* base, uint32_t hashmap_ea, Dumper& dumper,
                       bool do_dump, bool do_replace) {
     ScanStats stats{};
     uint32_t buckets_ptr = ReadBE32(base, hashmap_ea);
@@ -99,9 +133,9 @@ void ScanMCLAStringTable(bool trigger_rescan = false) {
     uint32_t table = ReadBE32(base, kStringTableGlobal);
     if (!table) return;
 
-    auto* ks = rex::system::kernel_state();
-    if (!ks) return;
-    auto& dumper = ks->string_dumper();
+    Dumper* active = ActiveDumper();
+    if (!active) return;
+    Dumper& dumper = *active;
 
     bool do_dump = REXCVAR_GET(string_dump_enabled);
     bool do_replace = REXCVAR_GET(string_replace_enabled);
