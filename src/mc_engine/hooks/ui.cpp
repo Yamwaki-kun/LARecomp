@@ -1,7 +1,7 @@
 // UI and HUD: intro skip, the movie lighting null check, ReXGlue settings from
 // Game Options, speedometer units, Xbox / PlayStation button glyphs, the UI
-// text language, and the Flash movies' step, paced to the 30 a second the
-// 360 drew.
+// text language, and the two places the UI counts frames the 360 drew at 30 a
+// second: the Flash movies' step and the menu cursor's auto-repeat.
 
 #ifndef REXGLUE_HAS_XEO3_TARGET
 #include <rex/cvar.h>
@@ -82,6 +82,15 @@ REXCVAR_DEFINE_STRING(ui_movie_pacing, "PHOTOALBUMMOVIE", "MCLA/UI",
     "(PHOTOALBUMMOVIE, POPUPMOVIE, PAUSEMOVIE, GARAGEMOVIE, NAVSYSMOVIE, ...), '*' "
     "for every movie, empty for none. The HUD is left out on purpose: stepping 30 "
     "times a second it would visibly lag a 60 FPS world.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_BOOL(ui_input_repeat_30hz, true, "MCLA/UI",
+    "Menu cursor auto-repeat at the console's pace. The game repeats a held "
+    "direction or button by counting frames -- the first repeat after 7, then one "
+    "every 6 -- which on the 360 meant 233 ms and then 200 ms. Above 30 FPS it "
+    "repeats faster with every frame: at 144 FPS a quick tap moves a list or the "
+    "photo album's slot cursor two places, and holding it scrolls ~24 items a "
+    "second. On, the count advances once every 1/30 s.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 bool SkipIntro() {
@@ -556,6 +565,89 @@ extern "C" REX_FUNC(rex_sub_82720898) {
 extern "C" REX_FUNC(rex_sub_825EDC08) {
     if (t_held_context && ctx.r3.u32 == t_held_context) return;
     __imp__rex_sub_825EDC08(ctx, base);
+}
+
+// ── Menu cursor auto-repeat ──────────────────────────────────────────────
+//
+// sub_82223CD8 is FlashNavigator::fnInputHandler's update (the handler sits at
+// navigator + 0x403D0; mcUIManager::Update sub_821FC588 calls it once per UI
+// update through the sub_82224920 thunk). It turns the 24 mapped UI buttons
+// into the uinput events every menu listens to, and a held button repeats by
+// counting updates:
+//
+//     pressed   target[i] = 7, count[i] = 0, post X_pressed and X
+//     released  target[i] = 7, count[i] = 0, post X_released
+//     held      if (++count[i] == target[i]) {
+//                   count[i] = 0, target[i] = handler[0x323] (6), post X }
+//
+// count = byte_8286E49C[24], target = byte_8286E480[24]. Button i's state is
+// the 12 bytes at unk_8286E4B8 + 12 * i: down = bit 7 of state[2] ^ state[0],
+// state[3] the same for the previous update. Nothing but this function and the
+// reset sub_8221D6A8 touches count or target.
+//
+// At the 360's 30 updates a second that is a first repeat 233 ms after the
+// press and then one every 200 ms. Uncapped it follows the frame rate: at
+// ~144 FPS `uinput.right` came 47-67 ms after the press and then every
+// 39-42 ms, so a normal tap moved the photo album's slot cursor two slots and
+// holding it ran ~24 a second. Every list and grid in the game shares this.
+//
+// So a held button's count advances once per 1/30 s: on an update where its
+// tick is not due, one is taken off before the game adds one. Presses,
+// releases and the events themselves still run every update.
+REX_EXTERN(__imp__rex_sub_82223CD8);  // FlashNavigator::fnInputHandler update
+
+namespace {
+constexpr uint32_t kUiButtons        = 24;
+constexpr uint32_t kUiRepeatCount    = 0x8286E49C;  // u8[24]
+constexpr uint32_t kUiButtonState    = 0x8286E4B8;  // 12 bytes per button
+constexpr int64_t kUiRepeatPeriodNs  = 1'000'000'000 / 30;
+// Takes the tick that lands a hair early at 60 FPS instead of a whole frame late.
+constexpr int64_t kUiRepeatSlackNs   = 2'000'000;
+}  // namespace
+
+extern "C" REX_FUNC(rex_sub_82223CD8) {
+    if (!REXCVAR_GET(ui_input_repeat_30hz)) {
+        __imp__rex_sub_82223CD8(ctx, base);
+        return;
+    }
+
+    // Only the UI update runs this, one thread.
+    static int64_t next_tick[kUiButtons] = {};
+    const int64_t now = SteadyNowNs();
+    uint8_t* const count = base + kUiRepeatCount;
+    uint8_t before[kUiButtons] = {};
+    uint32_t held_back = 0;
+
+    for (uint32_t i = 0; i < kUiButtons; ++i) {
+        const uint8_t* state = base + kUiButtonState + 12 * i;
+        const bool down = ((state[2] ^ state[0]) & 0x80) != 0;
+        const bool was_down = ((state[3] ^ state[0]) & 0x80) != 0;
+        if (!down) continue;
+        if (!was_down) {
+            next_tick[i] = now + kUiRepeatPeriodNs;  // the press: first tick 1/30 s away
+            continue;
+        }
+        if (now + kUiRepeatSlackNs >= next_tick[i]) {
+            // Due: the game's own ++count stands. A button that fell more than two
+            // periods behind restarts its schedule instead of catching up.
+            next_tick[i] = now - next_tick[i] > 2 * kUiRepeatPeriodNs
+                               ? now + kUiRepeatPeriodNs
+                               : next_tick[i] + kUiRepeatPeriodNs;
+            continue;
+        }
+        before[i] = count[i];
+        count[i] = static_cast<uint8_t>(before[i] - 1);
+        held_back |= 1u << i;
+    }
+
+    __imp__rex_sub_82223CD8(ctx, base);
+
+    // Some updates skip the whole button loop (the jumps to 0x82224470 at
+    // 0x82223FE8 / 0x82224000): put back what the game did not add.
+    for (uint32_t i = 0; held_back && i < kUiButtons; ++i) {
+        if ((held_back >> i & 1) && count[i] == static_cast<uint8_t>(before[i] - 1))
+            count[i] = before[i];
+    }
 }
 #else // REXGLUE_HAS_XEO3_TARGET
 // XEO3 stubs: empty implementations so the linker resolves codegen calls.
