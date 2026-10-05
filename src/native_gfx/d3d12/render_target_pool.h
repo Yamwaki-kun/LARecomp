@@ -133,6 +133,10 @@ struct RenderTarget {
   bool pending_guest_clear = false;
   float pending_clear_rgba[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   bool cleared = false;  // cleared once, then accumulated into
+  // The colour surface has been cleared at least once, so it holds something
+  // defined -- a fresh resource holds whatever the driver left. Only then may a
+  // frame keep its colour (mcla_native_gfx_keep_idle_display).
+  bool color_defined = false;
   // A depth resolve that covers the WHOLE source ends that surface's pass: on
   // Xenos the depth lives in EDRAM, which the next pass starts from scratch.
   // Without this the shadow map's 640x640 surface, reused by four consecutive

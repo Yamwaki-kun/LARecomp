@@ -77,6 +77,18 @@ REXCVAR_DEFINE_BOOL(mcla_native_gfx_fxaa, false, "MCLA/NativeGfx",
                     "source is the raw HDR scene target.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_BOOL(mcla_native_gfx_keep_idle_display, true, "MCLA/NativeGfx",
+                    "Fix: the second Rate My Ride photo (and any picture grabbed late) comes "
+                    "out black. On the console the presented surface keeps its pixels from one "
+                    "frame to the next unless the game clears it; here every frame started "
+                    "from the runtime's stand-in clear. While a picture is taken the game stops "
+                    "rendering the world and only draws a blit or a UI quad on top of the frozen "
+                    "frame, so the frame it grabbed held nothing but that clear. With this on, "
+                    "the presented R8G8B8A8 surface keeps its colour on a frame where no other "
+                    "screen-sized pass has drawn and the guest asked for no clear. Depth is "
+                    "cleared as before. Off for A/B.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 // TEMP DIAG helper for the rim probe: IEEE half -> float. first_draw.cpp has one
 // but it is not exported, and this is scaffolding that leaves with the probe.
 static float RimHalfToFloat(uint16_t h) {
@@ -4132,9 +4144,61 @@ static void CaptureDrawImpl(const uint8_t* base, uint32_t dev, uint32_t primitiv
     if (from_guest) {
       std::memcpy(clear_rgba, guest_clear.rgba, sizeof(clear_rgba));
     }
-    (void)from_guest;
-    cl->ClearRenderTargetView(rtv, clear_rgba, 0, nullptr);
-    if (target->color1 && (REXCVAR_GET(mcla_native_gfx_mrt) & 0x4u)) {
+    // EDRAM keeps a surface's pixels from one frame to the next; only a clear
+    // the guest asks for wipes them. Starting every frame from kClearColor is
+    // harmless while the world renders, because the composite then covers the
+    // whole presented surface, and wrong when the game stops rendering the world
+    // and only draws on top of what the surface already holds. Taking a picture
+    // does that: sub_8263D120 drops the phase mask to 0x28000000, and for the
+    // frames until the grab the only draw into the presented surface is a blit
+    // of the previous front buffer or a single UI quad. The second Rate My Ride
+    // photo was grabbed on a UI-quad frame and came out 921600 pixels of
+    // kClearColor; the first was grabbed on a blit frame and was fine. So the
+    // presented R8G8B8A8 surface keeps its colour when no other screen-sized pass
+    // has drawn this frame and the guest asked for no clear; depth is still
+    // cleared as before. Measured: it fires only at boot and for 4 to 10 frames
+    // around each picture, never while the world renders.
+    bool keep_color = false;
+    if (!from_guest && target->color_defined && display_shaped &&
+        target->key.rt_format == 28u && target->key.sample_count == 1u &&
+        REXCVAR_GET(mcla_native_gfx_keep_idle_display)) {
+      keep_color = true;
+      for (uint32_t i = 0; i < g_cap.candidate_count; ++i) {
+        if (g_cap.candidate_draws[i] != 0 && !(g_cap.candidate_config[i] == cfg)) {
+          keep_color = false;  // the world (or another screen pass) drew this frame
+          break;
+        }
+      }
+    }
+    if (display_shaped && target->key.rt_format == 28u && target->key.sample_count == 1u) {
+      // One line per change, so a session shows when the world went idle and the
+      // presented surface kept its colour. Expected around pictures and menus
+      // only; a line every frame would mean the rule is firing mid-gameplay.
+      static bool last_kept = false;
+      static uint32_t kept_run = 0;
+      static uint32_t lines = 0;
+      if (keep_color) {
+        ++kept_run;
+      }
+      if (keep_color != last_kept && lines < 200u) {
+        ++lines;
+        if (keep_color) {
+          REXLOG_INFO("[native_gfx] world idle: the presented surface keeps its colour");
+        } else {
+          REXLOG_INFO("[native_gfx] world drawing again after {} frame(s) of kept colour",
+                      kept_run);
+        }
+      }
+      if (!keep_color) {
+        kept_run = 0;
+      }
+      last_kept = keep_color;
+    }
+    if (!keep_color) {
+      cl->ClearRenderTargetView(rtv, clear_rgba, 0, nullptr);
+      target->color_defined = true;
+    }
+    if (!keep_color && target->color1 && (REXCVAR_GET(mcla_native_gfx_mrt) & 0x4u)) {
       // Target 1 is cleared with target 0's colour: the guest issues one
       // D3DDevice_Clear for the pass, and on the console it wipes every bound
       // surface. Leaving it dirty would let the previous species' normals show
