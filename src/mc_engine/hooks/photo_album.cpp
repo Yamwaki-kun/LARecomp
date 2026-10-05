@@ -1,7 +1,10 @@
 // The photo album -- the game's photo "gallery" -- and the photo-mode screens
 // around it (photo mode, the Rate My Ride snapshots).
 //
-// photo_ui_trace logs the UI statechart while the album scene is up.
+// A fix and a trace:
+//   - while you pick the slot for a new photo, the preview is the photo you just
+//     took, not the last saved one the cursor passed over;
+//   - photo_ui_trace logs the UI statechart while the album scene is up.
 //
 // RE map (default.xex, 04-05/10/2026):
 //
@@ -57,6 +60,18 @@
 //   sub_8263DFC0(album, slot)     SetPreviewPicture, run every time the cursor lands on
 //                                 a slot: empty_slot, preview_letterbox, then
 //                                 sub_8263C9C8.
+//
+// The slot picker's preview
+//   In save mode (overwritemode in the movie) the highlighted slot cross-fades between
+//   its thumbnail and PreviewPicture, and the big panel shows PreviewPicture unless
+//   empty_slot is set. sub_8263E1E8, which builds the thumbnails, decodes the new
+//   snapshot back into PreviewPicture after every slot while saving -- the game means
+//   PreviewPicture to be the new photo in that mode. But SetPreviewPicture decodes the
+//   highlighted slot's photo into the same image in save mode as well: the first
+//   saved photo the cursor touches -- including the slot it starts on, the last one
+//   viewed -- replaces the new photo, and nothing puts it back. From then on the
+//   pulse in the target slot and the panel show an old photo while you pick where the
+//   new one goes.
 
 #ifndef REXGLUE_HAS_XEO3_TARGET
 #include <rex/cvar.h>
@@ -73,12 +88,23 @@
 #include "hooks_internal.h"
 #include "../logging.h"
 
+REXCVAR_DEFINE_BOOL(photo_album_keep_new_preview, true, "MCLA/PhotoMode",
+    "Fix: while choosing the slot for a new photo, the album shows the photo you just "
+    "took -- in the big picture and pulsing in the highlighted slot -- instead of the "
+    "last saved photo the cursor passed over. The game decodes every photo into one "
+    "shared preview image, and in the slot picker it let the slots overwrite the new "
+    "one.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_BOOL(photo_ui_trace, true, "MCLA/Diagnostics",
     "Log the UI statechart while the photo album scene is up (photo mode, the album, "
     "the Rate My Ride snapshots): events posted and dispatched, delayed events, the "
     "UI.* and photoAlbum.* commands with the states they touch. Silent everywhere else.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REX_EXTERN(__imp__rex_sub_8263C9C8);  // decode a slot's photo into PreviewPicture
+REX_EXTERN(__imp__rex_sub_8263C8B0);  // decode the new snapshot into PreviewPicture
+REX_EXTERN(__imp__rex_sub_825EE0E0);  // swf: set an int variable
 REX_EXTERN(__imp__rex_sub_8221F160);  // FlashNavigator dispatch
 REX_EXTERN(__imp__rex_sub_8268EE40);  // vhsm post
 REX_EXTERN(__imp__rex_sub_8268ECE0);  // vhsm throwDelayedEvent
@@ -102,6 +128,13 @@ constexpr uint32_t kStateActive    = 0x80;
 constexpr uint32_t kNavLayers      = 263972;
 constexpr uint32_t kNavLayerRead   = 263988;
 constexpr uint32_t kNavLayerCount  = 263992;
+
+constexpr uint32_t kAlbumUiState         = 456;
+constexpr uint32_t kUiStateContext       = 56;
+constexpr uint32_t kAlbumSavingSnapshot  = 1170;
+constexpr uint32_t kStrEmptySlot         = 0x82090598;  // "empty_slot"
+constexpr uint32_t kCaptureFadePtr       = 0x8288B9AC;  // +68: frames sub_82304428 draws
+constexpr uint32_t kCaptureFadeFrames    = 68;
 
 uint32_t R32(const uint8_t* base, uint32_t ea) { return ea ? ReadGuestU32(base, ea) : 0; }
 uint16_t R16(const uint8_t* base, uint32_t ea) {
@@ -232,6 +265,42 @@ bool NoisyEvent(const std::string& ev) {
 }
 
 }  // namespace
+
+// ---------------------------------------------------------------------------
+// The slot picker's preview
+// ---------------------------------------------------------------------------
+
+// sub_8263C9C8(album, slot): show the slot's photo in PreviewPicture. While a new
+// photo is waiting for its slot, keep the new photo there instead, and keep the
+// panel showing it (empty_slot 0) rather than the empty-slot logo.
+extern "C" REX_FUNC(rex_sub_8263C9C8) {
+    const uint32_t album = ctx.r3.u32;
+    const uint32_t slot = ctx.r4.u32;
+    if (!REXCVAR_GET(photo_album_keep_new_preview) || !album ||
+        !base[album + kAlbumSavingSnapshot]) {
+        __imp__rex_sub_8263C9C8(ctx, base);
+        return;
+    }
+
+    // sub_8263C8B0 also asks for the five settle frames the capture uses; moving the
+    // cursor is not a capture, so that request is put back as it was.
+    const uint32_t fade = R32(base, kCaptureFadePtr);
+    const uint32_t fade_frames = fade ? R32(base, fade + kCaptureFadeFrames) : 0;
+    ctx.r3.u64 = album;
+    __imp__rex_sub_8263C8B0(ctx, base);
+    if (fade) WriteGuestU32(base, fade + kCaptureFadeFrames, fade_frames);
+
+    const uint32_t movie = R32(base, album + kAlbumUiState + kUiStateContext);
+    if (movie) {
+        ctx.r3.u64 = movie;
+        ctx.r4.u64 = kStrEmptySlot;
+        ctx.r5.u64 = 0;
+        __imp__rex_sub_825EE0E0(ctx, base);
+    }
+
+    if (Tracing(base))
+        MC_INFO("[photo-ui] slot picker on slot {}: the preview keeps the new photo", slot);
+}
 
 // ---------------------------------------------------------------------------
 // Trace
