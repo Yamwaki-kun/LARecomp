@@ -21,6 +21,7 @@
 #include "texture_cache.h"
 
 REXCVAR_DECLARE(bool, mcla_native_gfx_texture_swizzle);
+REXCVAR_DECLARE(bool, mcla_native_gfx_swizzle_by_source);
 REXCVAR_DECLARE(bool, mcla_native_gfx_pack_depth_stencil);
 
 REXCVAR_DECLARE(bool, mcla_native_gfx_bind_memo);
@@ -196,7 +197,7 @@ uint32_t SrvFormatForResource(ID3D12Resource* resource, uint32_t guest_format) {
 // Where this runtime's decode leaves each guest component, per guest format.
 // Encoded like the fetch swizzle: three bits per component, 0..3 pick a source
 // component, 4 is 0 and 5 is 1.
-uint32_t HostFormatSwizzle(uint32_t guest_format, bool tiled) {
+uint32_t HostFormatSwizzle(uint32_t guest_format, bool tiled, TextureSource source) {
   constexpr uint32_t kRgba = 0x688u;  // (X,Y,Z,W)
   constexpr uint32_t kRrrr = 0x000u;  // (X,X,X,X)
   constexpr uint32_t kBgra = 0x60Au;  // (Z,Y,X,W)
@@ -207,14 +208,29 @@ uint32_t HostFormatSwizzle(uint32_t guest_format, bool tiled) {
       // B5G5R5A1_UNORM over an unconverted R5G5B5A1 payload.
       return kBgra;
     case GuestTextureFormat::k_8_8_8_8:
-      // Measured discriminator, cause not yet understood: every k_8_8_8_8 in
-      // this game arrives end=2 with the same 0x60A fetch swizzle, but only the
-      // LINEAR ones want it applied. Those are the light data tables the
-      // multi-light shaders index (ColorT 128x256, light-index grid 512x640);
-      // applying it there is what makes the night and dusk city match the
-      // emulated. The TILED ones -- the noise and grading surfaces -- come out
-      // of the decode already in host order, and applying it again reddens the
-      // sky. Composing kBgra with a 0x60A fetch cancels to the identity.
+      // Every k_8_8_8_8 in this game arrives end=2 with the same 0x60A fetch
+      // swizzle: the guest stores A,R,G,B big-endian, the 8-in-32 swap leaves
+      // B,G,R,A, and 0x60A puts red back in x. That holds for whatever the
+      // decode reads out of guest memory, tiled or not: the light tables
+      // (ColorT 128x256, light-index grid 512x640, linear), the photo album
+      // thumbnails (64x32, tiled, written by the CPU: `ff 92 95 84` = A,R,G,B)
+      // and the car paint's flake noise (xCarPaintCustomizable's
+      // noiseColoredSampler, 128x128 tiled with mips).
+      //
+      // A render target served by the bridge is not in guest memory at all: it
+      // is the host's own R8G8B8A8, already in order, so the guest's swizzle has
+      // to be cancelled -- kBgra composed with 0x60A is the identity. Those are
+      // the noise, grading and sky surfaces, and they are all tiled, which is why
+      // tiling looked like the discriminator. A census of every 8888 bind (front
+      // end by day and by night, gameplay, the album) found the other
+      // tiled surfaces the decode reads all zeros or all 0xFF, where the swizzle
+      // changes nothing. Measured against the emulated path: thumbnails within 1
+      // level (they had red and blue swapped), the garage hood's mean within 0.5
+      // (the tiling rule put it 2.4 redder and 3.5 less blue), and the day and
+      // night front end moved less than two runs of the same build do.
+      if (REXCVAR_GET(mcla_native_gfx_swizzle_by_source)) {
+        return source == TextureSource::kRenderTargetBridge ? kBgra : kRgba;
+      }
       return tiled ? kBgra : kRgba;
     case GuestTextureFormat::k_8:
     case GuestTextureFormat::k_32_FLOAT:
@@ -257,7 +273,7 @@ uint32_t ShaderComponentMappingForSwizzle(uint32_t guest_swizzle, uint32_t guest
   // dst_swiz is composed, which is what the Xenos does.
   const uint32_t host_format_swizzle = source == TextureSource::kDepthAs8888
                                            ? 0x688u  // (X,Y,Z,W)
-                                           : HostFormatSwizzle(guest_format, tiled);
+                                           : HostFormatSwizzle(guest_format, tiled, source);
   uint32_t mapping = 0;
   for (uint32_t i = 0; i < 4; ++i) {
     const uint32_t guest_component = (guest_swizzle >> (3u * i)) & 0x7u;

@@ -494,6 +494,15 @@ REXCVAR_DEFINE_BOOL(mcla_native_gfx_texture_swizzle, true, "MCLA/NativeGfx",
                     "host swizzle (the piece Xenia composes with the guest one) is worked out.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_BOOL(mcla_native_gfx_swizzle_by_source, true, "MCLA/NativeGfx",
+                    "Decide whether a k_8_8_8_8 fetch's 0x60A swizzle still applies by where the "
+                    "texture came from instead of by its tiling. A render target served by the "
+                    "bridge is already in host RGBA order, so the guest's swizzle is cancelled; "
+                    "anything decoded from guest memory is in the guest's own layout and gets it, "
+                    "tiled or not. Off: the old rule (tiled = cancelled), which swaps red and blue "
+                    "on the photo album thumbnails and in the car paint's flake noise.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_BOOL(
     mcla_native_gfx_color_exp_bias, true, "MCLA/NativeGfx",
     "Fold the bound render target's colour exponent bias back into "
