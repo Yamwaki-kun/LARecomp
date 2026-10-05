@@ -1,6 +1,7 @@
 // UI and HUD: intro skip, the movie lighting null check, ReXGlue settings from
-// Game Options, speedometer units, Xbox / PlayStation button glyphs and the UI
-// text language.
+// Game Options, speedometer units, Xbox / PlayStation button glyphs, the UI
+// text language, and the Flash movies' step, paced to the 30 a second the
+// 360 drew.
 
 #ifndef REXGLUE_HAS_XEO3_TARGET
 #include <rex/cvar.h>
@@ -8,10 +9,16 @@
 #include <rex/runtime.h>
 #include <rex/system/function_dispatcher.h>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <cstdio>
+#include <mutex>
 #include <string>
+#include <string_view>
+#include <vector>
 
 #include "hooks.h"
+#include "hooks_internal.h"
 #include "../graphics_button.h"
 #include "../logging.h"
 #include "../online/online_common.h"  // IsGuestPtr
@@ -65,6 +72,16 @@ REXCVAR_DEFINE_STRING(language, "auto", "MCLA/Localization",
     "their old text until they are reopened -- the pause menu itself included, "
     "since the game resolves a row's label once when the row is built.")
     .allowed({"auto", "en", "es", "fr", "de", "it", "pt"})
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_STRING(ui_movie_pacing, "PHOTOALBUMMOVIE", "MCLA/UI",
+    "Flash movies advanced at the console's 30 frames a second instead of one frame "
+    "per rendered frame. The game steps every UI movie exactly one frame per update, "
+    "which on the 360 was 30 times a second; above 30 FPS those movies play faster "
+    "-- the photo album twice as fast at 60. Comma-separated movie names "
+    "(PHOTOALBUMMOVIE, POPUPMOVIE, PAUSEMOVIE, GARAGEMOVIE, NAVSYSMOVIE, ...), '*' "
+    "for every movie, empty for none. The HUD is left out on purpose: stepping 30 "
+    "times a second it would visibly lag a 60 FPS world.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 bool SkipIntro() {
@@ -324,6 +341,221 @@ bool OpenRexGraphicsFromGameOptions_826686D4(PPCRegister& r3) {
     mc::ui::RequestOpenRexGraphicsMenu();
     r3.u64 = 1;
     return true;
+}
+
+// ── UI movie pacing ──────────────────────────────────────────────────────
+//
+// *(0x8286D804) is mcUIManager; +60 is its movie map (atMap name -> movie**:
+// buckets* @+60, u16 count @+64; node +0 char* key, +4 u16 key length,
+// +8 movie**, +12 next). sub_821F9FB8 is the lookup by name. A movie has its
+// swf context at +56, the enabled flag at +68 and the commit flag at +71.
+//
+// sub_821FC588(mgr, dt), mcUIManager::Update, runs with the clock's unscaled
+// delta (0x827D7558) and steps every enabled movie with sub_82720898(movie,
+// ..., byte_827DC1FC, 1): ctx->vtbl[1] (sub_827221D8 / sub_827238B0), both
+// landing in sub_825EDC08(ctx, dt, ?, one_frame, ?), the swf advance.
+// one_frame != 0 advances EXACTLY one frame and ignores dt; 0 accumulates dt
+// and advances a frame per 256/rate seconds (rate = u16 8.8 fps at
+// movieDef+48). byte_827DC1FC, what the UI manager passes as one_frame, is 1 in
+// the image and nothing writes it: every movie advances one frame per update.
+// The 360 updated 30 times a second, so that is what the movies were made for;
+// at 60 FPS every Flash screen runs twice as fast, uncapped faster still. The
+// photo album's ActionScript animates per frame -- the preview panel eases
+// toward its target x, the overwrite highlight pulses with sin(f / 10) -- so
+// the gallery is where it shows.
+//
+// A movie named in ui_movie_pacing steps once per 1/30 s of real time: the
+// per-update step of a movie that is not due holds back its advance, and the
+// rest of that update (3D targets, commit) still runs.
+REX_EXTERN(__imp__rex_sub_82720898);  // movie per-update step
+REX_EXTERN(__imp__rex_sub_825EDC08);  // swf advance
+
+namespace {
+constexpr uint32_t kUiManagerPtr = 0x8286D804;
+constexpr uint32_t kMgrMovieMap  = 60;
+constexpr uint32_t kMovieContext = 56;
+constexpr uint32_t kMovieEnabled = 68;
+
+int64_t SteadyNowNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+uint32_t R32(const uint8_t* base, uint32_t ea) { return ea ? ReadGuestU32(base, ea) : 0; }
+uint16_t R16(const uint8_t* base, uint32_t ea) {
+    return ea ? uint16_t((uint32_t(base[ea]) << 8) | base[ea + 1]) : 0;
+}
+
+// A guest C string, or "" when the pointer is null or the bytes are not text.
+std::string GuestString(const uint8_t* base, uint32_t ea, size_t max = 48) {
+    if (ea < 0x10000u) return {};
+    const char* s = reinterpret_cast<const char*>(base + ea);
+    size_t n = 0;
+    while (n < max && s[n]) {
+        const unsigned char c = static_cast<unsigned char>(s[n]);
+        if (c < 0x20 || c > 0x7E) return {};
+        ++n;
+    }
+    return std::string(s, n);
+}
+
+std::string Hex(uint32_t v) {
+    char buf[12];
+    std::snprintf(buf, sizeof(buf), "%08X", v);
+    return buf;
+}
+
+// The movie entry registered under `name`, 0 when there is none (sub_821F9FB8).
+uint32_t FindMovie(const uint8_t* base, std::string_view name) {
+    const uint32_t mgr = R32(base, kUiManagerPtr);
+    if (!mgr) return 0;
+    const uint32_t buckets = R32(base, mgr + kMgrMovieMap);
+    const uint16_t count = R16(base, mgr + kMgrMovieMap + 4);
+    for (uint32_t i = 0; buckets && i < count; ++i) {
+        for (uint32_t node = R32(base, buckets + 4 * i), guard = 0; node && guard < 256;
+             node = R32(base, node + 12), ++guard) {
+            if (!R16(base, node + 4)) continue;
+            if (GuestString(base, R32(base, node), 64) != name) continue;
+            const uint32_t holder = R32(base, node + 8);
+            return holder ? R32(base, holder) : 0;
+        }
+    }
+    return 0;
+}
+
+struct PacedMovie {
+    uint32_t entry = 0;
+    std::string name;
+    int64_t next_due_ns = 0;
+    uint32_t advanced = 0;
+    uint32_t held = 0;
+};
+
+std::mutex g_pacing_mutex;
+std::vector<PacedMovie> g_paced;
+std::string g_paced_list;
+uint64_t g_paced_resolved_frame = ~0ull;
+int64_t g_pacing_report_ns = 0;
+
+// The context whose advance the movie update on this thread is holding back.
+thread_local uint32_t t_held_context = 0;
+
+// Re-reads the cvar and the movie map once per game frame: movies load and unload
+// with the screens that own them.
+void ResolvePacedMovies(const uint8_t* base) {
+    const uint64_t frame = g_frame_heartbeat.load(std::memory_order_relaxed);
+    if (frame == g_paced_resolved_frame) return;
+    g_paced_resolved_frame = frame;
+
+    const std::string list = REXCVAR_GET(ui_movie_pacing);
+    if (list != g_paced_list) {
+        g_paced_list = list;
+        g_paced.clear();
+        size_t pos = 0;
+        while (pos <= list.size()) {
+            size_t end = list.find(',', pos);
+            if (end == std::string::npos) end = list.size();
+            std::string name = list.substr(pos, end - pos);
+            while (!name.empty() && name.front() == ' ') name.erase(name.begin());
+            while (!name.empty() && name.back() == ' ') name.pop_back();
+            if (!name.empty() && name != "*") g_paced.push_back(PacedMovie{0, name});
+            pos = end + 1;
+        }
+    }
+    if (list == "*") return;  // every movie gets an entry on first sight instead
+    for (PacedMovie& m : g_paced) {
+        const uint32_t entry = FindMovie(base, m.name);
+        if (entry != m.entry) {
+            m.entry = entry;
+            m.next_due_ns = 0;
+        }
+    }
+}
+
+PacedMovie* PacingFor(const uint8_t* base, uint32_t entry) {
+    ResolvePacedMovies(base);
+    for (PacedMovie& m : g_paced)
+        if (m.entry == entry) return &m;
+    if (g_paced_list == "*" && entry) {
+        if (g_paced.size() > 64) g_paced.clear();
+        g_paced.push_back(PacedMovie{entry, Hex(entry)});
+        return &g_paced.back();
+    }
+    return nullptr;
+}
+
+// One movie frame per 1/30 s of real time. The 2 ms slack takes the frame that lands
+// a hair early at 60 FPS instead of pushing it a whole render frame late; a movie that
+// fell more than two periods behind (disabled, or a stall) restarts its schedule
+// instead of catching up -- the console never advanced a movie twice in one update.
+bool AdvanceDue(PacedMovie& m, int64_t now) {
+    constexpr int64_t kPeriodNs = 1'000'000'000 / 30;
+    constexpr int64_t kSlackNs = 2'000'000;
+    if (m.next_due_ns == 0 || now - m.next_due_ns > 2 * kPeriodNs) {
+        m.next_due_ns = now + kPeriodNs;
+        return true;
+    }
+    if (now + kSlackNs < m.next_due_ns) return false;
+    m.next_due_ns += kPeriodNs;
+    return true;
+}
+
+// Every 10 s, into photo_ui_trace's log while the album scene is up.
+void ReportPacing(const uint8_t* base, int64_t now) {
+    constexpr int64_t kReportNs = 10'000'000'000;
+    if (now - g_pacing_report_ns < kReportNs) return;
+    g_pacing_report_ns = now;
+    const bool trace = PhotoUiTracing(base);
+    for (PacedMovie& m : g_paced) {
+        if (trace && (m.advanced || m.held))
+            MC_INFO("[photo-ui] pacing {}: {} frame(s) advanced, {} update(s) held in the last 10 s",
+                    m.name, m.advanced, m.held);
+        m.advanced = 0;
+        m.held = 0;
+    }
+}
+}  // namespace
+
+// Movie per-update step. A paced movie that is not due holds back its advance this
+// update; the rest of the update (3D targets, commit) still runs.
+//
+// Except while a photo is being taken (photo_album.cpp): the game hides its whole UI
+// when the countdown ends and grabs the front buffer more than three updates later,
+// counting on the movie having stepped -- and so hidden itself -- in every one of
+// them. Held to 30 steps a second the movie could still be on screen when the grab
+// comes at a few hundred FPS, so for that tenth of a second it steps every update as
+// it always did.
+extern "C" REX_FUNC(rex_sub_82720898) {
+    const uint32_t entry = ctx.r3.u32;
+    uint32_t held = 0;
+    if (entry && base[entry + kMovieEnabled]) {
+        std::lock_guard<std::mutex> lock(g_pacing_mutex);
+        if (PacedMovie* m = PacingFor(base, entry)) {
+            const int64_t now = SteadyNowNs();
+            if (PhotoCaptureInProgress(base)) {
+                m->next_due_ns = 0;  // back on the 30 Hz schedule from the next update
+                ++m->advanced;
+            } else if (AdvanceDue(*m, now)) {
+                ++m->advanced;
+            } else {
+                ++m->held;
+                held = R32(base, entry + kMovieContext);
+            }
+            ReportPacing(base, now);
+        }
+    }
+    const uint32_t outer = t_held_context;
+    t_held_context = held;
+    __imp__rex_sub_82720898(ctx, base);
+    t_held_context = outer;
+}
+
+// The swf advance. Only the per-update step above ever holds one back; every other
+// path (sub_82720288's double step on a movie's first frames, ...) runs untouched.
+extern "C" REX_FUNC(rex_sub_825EDC08) {
+    if (t_held_context && ctx.r3.u32 == t_held_context) return;
+    __imp__rex_sub_825EDC08(ctx, base);
 }
 #else // REXGLUE_HAS_XEO3_TARGET
 // XEO3 stubs: empty implementations so the linker resolves codegen calls.

@@ -5,11 +5,15 @@
 //   - while you pick the slot for a new photo, the preview is the photo you just
 //     took, not the last saved one the cursor passed over;
 //   - photo_ui_trace logs the UI statechart while the album scene is up.
+// The gallery's speed -- every Flash movie steps once per rendered frame, so above
+// 30 FPS it plays fast -- is paced in ui.cpp (ui_movie_pacing), which asks
+// PhotoCaptureInProgress() here to leave the capture alone.
 //
 // RE map (default.xex, 04-05/10/2026):
 //
 // UI plumbing
-//   *(0x8286D804)                 mcUIManager. +52 FlashNavigator.
+//   *(0x8286D804)                 mcUIManager. +52 FlashNavigator. Its movie map (+60)
+//                                 and the per-update movie step are mapped in ui.cpp.
 //
 // Statechart (tune/ui/*.sc.xml)
 //   FlashNavigator + 4            the vhsm machine. +8 registered event objects (count
@@ -99,9 +103,11 @@ REXCVAR_DEFINE_BOOL(photo_album_keep_new_preview, true, "MCLA/PhotoMode",
 REXCVAR_DEFINE_BOOL(photo_ui_trace, true, "MCLA/Diagnostics",
     "Log the UI statechart while the photo album scene is up (photo mode, the album, "
     "the Rate My Ride snapshots): events posted and dispatched, delayed events, the "
-    "UI.* and photoAlbum.* commands with the states they touch. Silent everywhere else.")
+    "UI.* and photoAlbum.* commands with the states they touch, and the paced movies' "
+    "frame counts every 10 seconds. Silent everywhere else.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REX_EXTERN(__imp__rex_sub_8263CB78);  // snapshot vhsm update
 REX_EXTERN(__imp__rex_sub_8263C9C8);  // decode a slot's photo into PreviewPicture
 REX_EXTERN(__imp__rex_sub_8263C8B0);  // decode the new snapshot into PreviewPicture
 REX_EXTERN(__imp__rex_sub_825EE0E0);  // swf: set an int variable
@@ -203,6 +209,11 @@ std::string StateName(const uint8_t* base, uint32_t state) {
     return name.empty() ? Hex(state) : name;
 }
 
+// The album's UI state (album+456), as last seen by the snapshot vhsm update
+// (sub_8263CB78, render thread); +132 there is the capture phase.
+std::atomic<uint32_t> g_album_ui_state{0};
+constexpr uint32_t kCapturePhase = 132;
+
 // --------------------------------------------------------------------------
 // Statechart trace (photo_ui_trace)
 // --------------------------------------------------------------------------
@@ -265,6 +276,25 @@ bool NoisyEvent(const std::string& ev) {
 }
 
 }  // namespace
+
+// TakePicture (phase 6) until the grab is done (phase 3).
+bool PhotoCaptureInProgress(const uint8_t* base) {
+    const uint32_t state = g_album_ui_state.load(std::memory_order_relaxed);
+    if (!state) return false;
+    const uint32_t phase = R32(base, state + kCapturePhase);
+    return phase == 6 || phase == 3;
+}
+
+bool PhotoUiTracing(const uint8_t* base) {
+    return Tracing(base);
+}
+
+// The snapshot vhsm update (r3 = album+456). Only remembered here, for
+// PhotoCaptureInProgress; photo_mode.cpp's Hook_PhotoModeCapture runs inside it.
+extern "C" REX_FUNC(rex_sub_8263CB78) {
+    g_album_ui_state.store(ctx.r3.u32, std::memory_order_relaxed);
+    __imp__rex_sub_8263CB78(ctx, base);
+}
 
 // ---------------------------------------------------------------------------
 // The slot picker's preview

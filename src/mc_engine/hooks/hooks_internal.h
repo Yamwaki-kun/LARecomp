@@ -72,6 +72,12 @@ void HoldGlobalReadback(ReadbackClient client, int64_t hold_ns);
 // HoldGlobalReadback that turned it on.
 void TickGlobalReadback();
 
+// photo_album.cpp
+// From TakePicture until the grab is done (snapshot vhsm phase 6 or 3).
+bool PhotoCaptureInProgress(const uint8_t* base);
+// photo_ui_trace is on and the photo album scene is up.
+bool PhotoUiTracing(const uint8_t* base);
+
 // vinyl.cpp
 void ApplyVinylLayerCaps();
 void TickVinylReadbackWindow();
