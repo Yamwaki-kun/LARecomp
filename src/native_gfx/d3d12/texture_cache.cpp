@@ -8,6 +8,7 @@
 #include <set>
 #include <cstdio>
 #include <cstring>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -401,6 +402,36 @@ void NoteResolveFailure(const TextureFetch& fetch, const char* why) {
     std::fclose(f);
   }
 }
+
+// Bytes of a tiled surface that can be read at `address`, 0 when not enough can.
+//
+// The padded bound (TiledSurfaceSizeBytes) is the quick answer, but its slack
+// can run past the guest's own allocation into a page nobody committed. The
+// photo album's empty-slot picture (default_picture.dds: 128x72 DXT5 at
+// 0x039BC000) has 16 KB allocated and a free page after it, and its bound is
+// 18 KB: it was refused here, so every empty slot sampled the neutral white
+// where the emulated path shows a grey camera. The swizzle itself only reaches
+// 14 KB of it. So when the bound is not readable, the exact reach decides.
+uint64_t ReadableTiledBytes(uint32_t address, uint32_t width_blocks, uint32_t height_blocks,
+                            uint32_t bytes_per_block) {
+  const uint64_t bound = TiledSurfaceSizeBytes(width_blocks, height_blocks, bytes_per_block);
+  if (IsPhysicalRangeReadable(address, bound)) {
+    return bound;
+  }
+  // The reach walks every block, and a fetch that keeps failing is asked again
+  // every frame: remember it per extent.
+  thread_local std::unordered_map<uint64_t, uint64_t> reach_by_extent;
+  const uint64_t key =
+      (uint64_t(width_blocks) << 40) | (uint64_t(height_blocks) << 16) | bytes_per_block;
+  auto it = reach_by_extent.find(key);
+  if (it == reach_by_extent.end()) {
+    it = reach_by_extent
+             .emplace(key, TiledSurfaceReachBytes(width_blocks, height_blocks, bytes_per_block))
+             .first;
+  }
+  const uint64_t reach = it->second;
+  return reach && reach < bound && IsPhysicalRangeReadable(address, reach) ? reach : 0;
+}
 }  // namespace
 
 ID3D12Resource* TextureCache::Resolve(D3D12Context& context, ID3D12GraphicsCommandList* cl,
@@ -638,11 +669,11 @@ ID3D12Resource* TextureCache::Resolve(D3D12Context& context, ID3D12GraphicsComma
   // fetch constant pointing at an uncommitted page faults the process.
   const uint64_t src_size =
       fetch.tiled
-          ? TiledSurfaceSizeBytes(width_blocks, height_blocks, fi.bytes_per_block)
+          ? ReadableTiledBytes(fetch.base_address, width_blocks, height_blocks, fi.bytes_per_block)
           : uint64_t(height_blocks) * (fetch.pitch
                                            ? (fetch.pitch / fi.block_width) * fi.bytes_per_block
                                            : src_pitch);
-  if (!IsPhysicalRangeReadable(fetch.base_address, src_size)) {
+  if (fetch.tiled ? src_size == 0 : !IsPhysicalRangeReadable(fetch.base_address, src_size)) {
     ++stats_.decode_failures;
     NoteResolveFailure(fetch, "guest range not readable");
     return nullptr;
@@ -739,12 +770,17 @@ ID3D12Resource* TextureCache::Resolve(D3D12Context& context, ID3D12GraphicsComma
       }
       p.guest_pitch = lv.row_pitch_bytes ? lv.row_pitch_bytes
                                          : p.src_extent_x_blocks * fi.bytes_per_block;
-      p.guest_size = fetch.tiled ? TiledSurfaceSizeBytes(p.src_extent_x_blocks,
-                                                         p.src_extent_y_blocks, fi.bytes_per_block)
-                                 : uint64_t(p.src_extent_y_blocks) * p.guest_pitch;
+      // A tiled level gets the readable extent, which the untile below then
+      // honours block by block when it is shorter than the padded bound.
+      p.guest_size = !fetch.tiled ? uint64_t(p.src_extent_y_blocks) * p.guest_pitch
+                     : p.guest_address
+                         ? ReadableTiledBytes(p.guest_address, p.src_extent_x_blocks,
+                                              p.src_extent_y_blocks, fi.bytes_per_block)
+                         : 0;
       p.upload_pitch = Align(p.width_blocks * fi.bytes_per_block, kUploadRowAlignment);
       p.upload_size = uint64_t(p.upload_pitch) * p.height_blocks;
-      if (p.guest_address == 0 || !IsPhysicalRangeReadable(p.guest_address, p.guest_size)) {
+      if (p.guest_address == 0 || p.guest_size == 0 ||
+          (!fetch.tiled && !IsPhysicalRangeReadable(p.guest_address, p.guest_size))) {
         break;
       }
       plans[level] = p;

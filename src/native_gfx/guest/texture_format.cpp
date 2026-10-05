@@ -238,6 +238,24 @@ uint64_t TiledSurfaceSizeBytes(uint32_t width_blocks, uint32_t height_blocks,
   return effective_pitch * (rows < 32 ? 32 : rows) + 2048;
 }
 
+uint64_t TiledSurfaceReachBytes(uint32_t width_blocks, uint32_t height_blocks,
+                                uint32_t bytes_per_block) {
+  // No shortcut: the highest address is not always in the last macro-tile row
+  // (brute force over 28875 extents x 5 block sizes disagreed with that guess in
+  // 1728 of them), so every block is visited.
+  const uint32_t bpb_log2 = BppLog2(bytes_per_block);
+  uint32_t highest = 0;
+  for (uint32_t y = 0; y < height_blocks; ++y) {
+    for (uint32_t x = 0; x < width_blocks; ++x) {
+      const int32_t off = tu::GetTiledOffset2D(int32_t(x), int32_t(y), width_blocks, bpb_log2);
+      if (off > 0 && uint32_t(off) > highest) {
+        highest = uint32_t(off);
+      }
+    }
+  }
+  return width_blocks && height_blocks ? uint64_t(highest) + bytes_per_block : 0;
+}
+
 uint32_t TiledOffset2D(uint32_t x_block, uint32_t y_block, uint32_t width_blocks,
                        uint32_t bytes_per_block) {
   // tu::GetTiledOffset2D aligns the pitch to a 32-block tile internally and

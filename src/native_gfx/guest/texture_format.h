@@ -142,6 +142,13 @@ inline uint32_t AlignToTile(uint32_t blocks) {
 uint64_t TiledSurfaceSizeBytes(uint32_t width_blocks, uint32_t height_blocks,
                                uint32_t bytes_per_block);
 
+// Exactly how far the swizzle reaches for this extent: one past the last byte
+// of the highest block address. Never more than TiledSurfaceSizeBytes, which
+// adds slack on top; walks every block, so it is for the rare case where that
+// slack runs into memory the guest never committed.
+uint64_t TiledSurfaceReachBytes(uint32_t width_blocks, uint32_t height_blocks,
+                                uint32_t bytes_per_block);
+
 // Converts a tiled surface to linear. `src_size_bytes` is the number of
 // bytes readable at `src` and MUST be at least TiledSurfaceSizeBytes(...);
 // blocks whose swizzled address would fall outside it are skipped rather
