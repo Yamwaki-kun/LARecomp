@@ -383,6 +383,9 @@ class LarecompApp : public rex::ReXApp {
   }
 
   void OnShutdown() override {
+    // Closing the window while the boot content build runs: let it finish
+    // writing the mod archive before the process goes, as it always did.
+    larecomp::WaitForBootBuild();
 #if defined(_WIN32)
     mcla::native_gfx::NativeSwapChain::Instance().Shutdown();
     mcla::native_gfx::DeviceManager::Instance().Shutdown();
@@ -479,24 +482,62 @@ class LarecompApp : public rex::ReXApp {
   // Filled by OnConfigurePaths, which runs before logging exists.
   std::vector<std::string> path_notes_;
 
+  // First-launch wizards: install the game files from an ISO, then offer to
+  // import a save. Both are asynchronous -- rex::ReXApp lets this hook return
+  // std::nullopt and call `resume` later from the UI thread -- because a nested
+  // message loop never drains the SDL event queue the window lives on, and the
+  // stock SDK offers no way to pump it at all. While a wizard is up, the app's
+  // own loop keeps drawing it.
   std::optional<rex::PathConfig> OnFinalizePaths(const rex::PathConfig& defaults, std::function<void(rex::PathConfig)> resume) override {
     rex::PathConfig paths = defaults;
 
     if (!larecomp::IsGameInstalled(paths.game_data_root)) {
-      rex::PathConfig installed_paths;
-      if (!larecomp::RunRexglueIsoInstallWizardBlocking(app_context(), window(), imgui_drawer(), paths, installed_paths)) {
+      bool attempted = false;
+      if (larecomp::TryAutomatedIsoInstall(paths, attempted)) {
+        // Installed unattended; carry on as if the files had been there.
+      } else if (attempted) {
         std::_Exit(1);
+      } else if (!imgui_drawer()) {
+        LARECOMP_APP_ERROR("Game files are missing and there is no UI to install them from");
+        std::_Exit(1);
+      } else {
+        larecomp::ShowRexglueIsoInstallWizard(
+            imgui_drawer(), paths, [this, resume](rex::PathConfig installed) {
+              // Called from the wizard's own draw: step out of it first.
+              app_context().CallInUIThreadDeferred(
+                  [this, resume, installed = std::move(installed)]() mutable {
+                    ContinueAfterInstall(std::move(installed), resume);
+                  });
+            });
+        return std::nullopt;
       }
-      paths = installed_paths;
     }
 
-    // First launch with no save: offer to import one from Xenia / RPCS3.
-    // Skipping is fine -- the game creates a new save on its own.
-    if (!larecomp::SaveAlreadyPresent(paths.user_data_root)) {
-      larecomp::RunSaveImportWizardBlocking(app_context(), window(), imgui_drawer(), paths);
+    if (OfferSaveImport(paths, resume)) {
+      return std::nullopt;
     }
-
     return paths;
+  }
+
+  // After the ISO wizard: the save offer, then hand the paths back to ReXApp.
+  void ContinueAfterInstall(rex::PathConfig paths, std::function<void(rex::PathConfig)> resume) {
+    if (!OfferSaveImport(paths, resume)) {
+      resume(std::move(paths));
+    }
+  }
+
+  // First launch with no save: offer to import one from Xenia / RPCS3.
+  // Skipping is fine -- the game creates a new save on its own. True when the
+  // wizard is up and will call `resume` itself once it closes.
+  bool OfferSaveImport(const rex::PathConfig& paths, const std::function<void(rex::PathConfig)>& resume) {
+    if (larecomp::SaveAlreadyPresent(paths.user_data_root)) {
+      return false;
+    }
+    return larecomp::ShowSaveImportWizard(
+        imgui_drawer(), paths, [this, resume, paths]() {
+          // Runs from the dialog's close, inside its draw: resume outside it.
+          app_context().CallInUIThreadDeferred([resume, paths]() { resume(paths); });
+        });
   }
 
   void OnPostLoadXexImage() override {
@@ -652,18 +693,32 @@ class LarecompApp : public rex::ReXApp {
       SetGuestFrameStats([] { return mcla::native_gfx::nocp::GuestFrameStats(); });
     }
 
-    // Mods and custom music are built here rather than from InitHooks so the
-    // work can happen off the UI thread with a progress popup over the window.
-    // It still lands before the guest runs, which is all the archive mount
-    // cares about. InitHooks' own call is a no-op after this one.
-    larecomp::RunBootBuildWithOverlay(app_context(), window(), imgui_drawer(),
-                                      []() { mc::modloader::Init(); });
+    // The rest of setup -- the mod/music build, then the hooks -- continues in
+    // LaunchModule, so the build can run off the UI thread without a nested
+    // message loop.
+  }
 
+  // Mods and custom music are built here rather than from InitHooks so the work
+  // can happen off the UI thread with a progress popup over the window, and
+  // still land before the guest runs, which is all the archive mount cares
+  // about. ReXApp::LaunchModule is what starts the guest; it only runs once the
+  // build is done. Everything OnPostSetup used to do after the build follows it
+  // here, in the same order, so none of it ever runs beside the build.
+  void LaunchModule() override {
+    larecomp::StartBootBuildWithOverlay(
+        app_context(), imgui_drawer(), []() { mc::modloader::Init(); },
+        [this]() {
+          FinishSetupAfterBootBuild();
+          rex::ReXApp::LaunchModule();
+        });
+  }
+
+  void FinishSetupAfterBootBuild() {
     LARECOMP_Discord_Init();
     mc::ui::InitGraphicsButtonPatch();
     InitPauseMenuHooks();
     InitMapMouse();
     InitStringTableTools();
-    InitHooks();
+    InitHooks();  // its own modloader::Init call is a no-op after the build
   }
 };

@@ -165,6 +165,7 @@ set(LARECOMP_SOURCES
     src/discord_rpc/discord_hooks.cpp
 
     src/isoinstaller/larecomp_iso_installer.cpp
+    src/isoinstaller/install_wizard_dialog.cpp
     src/saveporter/larecomp_save_porter.cpp
     src/bootprogress/larecomp_boot_progress.cpp
 )

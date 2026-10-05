@@ -10,12 +10,11 @@
 #pragma once
 
 #include <filesystem>
+#include <functional>
 
 #include <rex/rex_app.h>
 
 namespace rex::ui {
-class WindowedAppContext;
-class Window;
 class ImGuiDrawer;
 }  // namespace rex::ui
 
@@ -24,13 +23,19 @@ namespace larecomp {
 // True if a usable mc4.sav already exists in the larecomp content store.
 bool SaveAlreadyPresent(const std::filesystem::path& user_data_root);
 
-// Shows the pre-runtime save-import wizard and pumps the UI until the user
-// imports a save or skips. Skipping is not an error: the game then offers to
-// create a new save on its own. Safe to call only when SaveAlreadyPresent()
+// Shows the pre-runtime save-import wizard and returns at once. True means the
+// wizard is up and `on_finished` will run (on the UI thread, from the dialog's
+// own draw) when the player imports a save or skips; false means there was
+// nothing to offer -- skip_save_import, no emulator save found, no UI -- and
+// `on_finished` is never called. Skipping is not an error: the game then
+// creates a new save on its own. Safe to call only when SaveAlreadyPresent()
 // is false.
-void RunSaveImportWizardBlocking(rex::ui::WindowedAppContext& app_context,
-                                 rex::ui::Window* window,
-                                 rex::ui::ImGuiDrawer* drawer,
-                                 const rex::PathConfig& paths);
+//
+// Asynchronous on purpose. The SDK's window backend is SDL, and a nested
+// message loop under it never drains SDL's event queue; the stock SDK does not
+// even offer a way to pump it. OnFinalizePaths returns std::nullopt while the
+// wizard is up and resumes from `on_finished`.
+bool ShowSaveImportWizard(rex::ui::ImGuiDrawer* drawer, const rex::PathConfig& paths,
+                          std::function<void()> on_finished);
 
 }  // namespace larecomp

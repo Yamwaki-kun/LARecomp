@@ -717,13 +717,13 @@ bool SaveAlreadyPresent(const fs::path& user_data_root) {
   return present;
 }
 
-void RunSaveImportWizardBlocking(rex::ui::WindowedAppContext& app_context, rex::ui::Window* window,
-                                 rex::ui::ImGuiDrawer* drawer, const rex::PathConfig& paths) {
+bool ShowSaveImportWizard(rex::ui::ImGuiDrawer* drawer, const rex::PathConfig& paths,
+                          std::function<void()> on_finished) {
   const fs::path user_data_root = paths.user_data_root;
 
   if (REXCVAR_GET(skip_save_import)) {
     REXLOG_INFO("Save import: skipped (skip_save_import)");
-    return;
+    return false;
   }
 
   const fs::path xenia = FindXeniaSave();
@@ -735,49 +735,19 @@ void RunSaveImportWizardBlocking(rex::ui::WindowedAppContext& app_context, rex::
   // between a first-time player and the title. Skip it.
   if (xenia.empty() && rpcs3.empty()) {
     REXLOG_INFO("Save import: nothing found to import, starting without a save");
-    return;
+    return false;
+  }
+  if (!drawer) {
+    REXLOG_WARN("Save import: no UI to show the wizard on, starting without importing");
+    return false;
   }
 
-  auto done = std::make_shared<std::atomic<bool>>(false);
-  // Self-deletes on Close(); the completion callback releases the pump below.
-  new SaveImportDialog(drawer, user_data_root, xenia, rpcs3,
-                       [done]() { done->store(true, std::memory_order_release); });
-
-  REXLOG_INFO("Entering save import pump");
-  // Step tracing for the first ticks only: the pump is the first thing that
-  // runs after the profile name is accepted, and a death in here leaves a log
-  // that just stops. INFO is flushed per line, so the last one printed names
-  // the statement that died.
-  int tick = 0;
-  while (!done->load(std::memory_order_acquire) && !app_context.HasQuitFromUIThread()) {
-    const bool trace = tick < 5;
-    if (trace) REXLOG_INFO("Save pump tick {}: pending functions", tick);
-    app_context.ExecutePendingFunctionsFromUIThread();
-
-    if (trace) REXLOG_INFO("Save pump tick {}: pump events", tick);
-    app_context.PumpEvents();
-
-    if (app_context.HasQuitFromUIThread()) {
-      break;
-    }
-    if (window) {
-      if (trace) REXLOG_INFO("Save pump tick {}: request paint", tick);
-      window->RequestPaint();
-    }
-    if (trace) REXLOG_INFO("Save pump tick {}: done", tick);
-    ++tick;
-    std::this_thread::sleep_for(std::chrono::milliseconds(8));
-  }
-
-  // Closing the window during the wizard tears the surface down. Booting the
-  // title anyway leaves it rendering into a dead window (a black screen that
-  // never starts), so quit here the same way the ISO installer does.
-  if (app_context.HasQuitFromUIThread()) {
-    REXLOG_INFO("Leaving save import pump: window closed, aborting startup");
-    ShutdownLarecompLogging();
-    std::_Exit(0);
-  }
-  REXLOG_INFO("Leaving save import pump");
+  // Self-deletes on Close(), which is also what calls `on_finished`. No pump:
+  // while a dialog is open the ImGui drawer keeps requesting paints, so the
+  // app's own loop draws it (see the SDL note in larecomp_save_porter.h).
+  REXLOG_INFO("Save import: showing the wizard");
+  new SaveImportDialog(drawer, user_data_root, xenia, rpcs3, std::move(on_finished));
+  return true;
 }
 
 }  // namespace larecomp

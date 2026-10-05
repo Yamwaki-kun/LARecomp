@@ -18,10 +18,8 @@
 #include <vector>
 
 #include <rex/logging.h>
-#include <rex/ui/overlay/install_wizard_overlay.h>
-#include <rex/ui/window.h>
-#include <rex/ui/windowed_app_context.h>
-#include <rex/ui/windowed_app_context_sdl.h>
+
+#include "install_wizard_dialog.h"
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -30,8 +28,11 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include <commdlg.h>
+// windows.h first: commdlg.h needs its types, and WIN32_LEAN_AND_MEAN keeps
+// windows.h from pulling commdlg.h in on its own. (The SDK window headers used
+// to bring windows.h in ahead of this; the vendored wizard does not.)
 #include <windows.h>
+#include <commdlg.h>
 
 #elif defined(__APPLE__)
 #else
@@ -444,12 +445,15 @@ bool IsGameInstalled(const std::filesystem::path& game_root) {
   return complete;
 }
 
-void ShowRexglueIsoInstallWizard(rex::ui::ImGuiDrawer* drawer, rex::PathConfig runtime_paths,
-                                 std::function<void(rex::PathConfig)> complete) {
-  auto pick_source = []() { return PickIsoFile(); };
-  auto install = [game_root = runtime_paths.game_data_root](
-                     const std::filesystem::path& source, std::atomic<uint64_t>& copied_bytes,
-                     std::atomic<uint64_t>& total_bytes, std::function<void(std::string)> update_status, std::string& error) {
+namespace {
+
+// Extracts the ISO into `game_root` and verifies the result. Shared by the
+// wizard and the unattended LARECOMP_INSTALL_ISO path.
+InstallWizardDialog::InstallCallback MakeIsoInstall(std::filesystem::path game_root) {
+  return [game_root = std::move(game_root)](
+             const std::filesystem::path& source, std::atomic<uint64_t>& copied_bytes,
+             std::atomic<uint64_t>& total_bytes, std::function<void(std::string)> update_status,
+             std::string& error) {
     XboxIsoReader iso;
     if (!iso.Open(source, error)) {
       return false;
@@ -464,11 +468,18 @@ void ShowRexglueIsoInstallWizard(rex::ui::ImGuiDrawer* drawer, rex::PathConfig r
     }
     return true;
   };
+}
 
-  new rex::ui::InstallWizardDialog(
+}  // namespace
+
+void ShowRexglueIsoInstallWizard(rex::ui::ImGuiDrawer* drawer, rex::PathConfig runtime_paths,
+                                 std::function<void(rex::PathConfig)> complete) {
+  const std::u8string install_dir = runtime_paths.game_data_root.u8string();
+  new InstallWizardDialog(
       drawer, "MCLA: CE Setup",
       "MCLA: CE game files were not found. Select your Xbox 360 ISO to install them.",
-      runtime_paths.game_data_root.string(), std::move(pick_source), std::move(install),
+      std::string(install_dir.begin(), install_dir.end()), []() { return PickIsoFile(); },
+      MakeIsoInstall(runtime_paths.game_data_root),
       [runtime_paths = std::move(runtime_paths), complete = std::move(complete)]() mutable {
         if (complete) {
           complete(std::move(runtime_paths));
@@ -476,80 +487,23 @@ void ShowRexglueIsoInstallWizard(rex::ui::ImGuiDrawer* drawer, rex::PathConfig r
       });
 }
 
-bool RunRexglueIsoInstallWizardBlocking(rex::ui::WindowedAppContext& app_context,
-                                        rex::ui::Window* window,
-                                        rex::ui::ImGuiDrawer* drawer,
-                                        rex::PathConfig runtime_paths,
-                                        rex::PathConfig& installed_paths) {
-  struct InstallResult {
-    bool done = false;
-    bool ok = false;
-    rex::PathConfig paths;
-  };
-
-  auto result = std::make_shared<InstallResult>();
-  auto install = [game_root = runtime_paths.game_data_root](
-                     const std::filesystem::path& source, std::atomic<uint64_t>& copied_bytes,
-                     std::atomic<uint64_t>& total_bytes, std::function<void(std::string)> update_status, std::string& error) {
-    XboxIsoReader iso;
-    if (!iso.Open(source, error)) {
-      return false;
-    }
-    total_bytes = iso.TotalSize();
-    if (!iso.ExtractAll(game_root, copied_bytes, update_status, error)) {
-      return false;
-    }
-    if (!IsGameInstalled(game_root)) {
-      error = "Installation completed, but game files are missing from the install directory (see the log for which).";
-      return false;
-    }
-    return true;
-  };
-
-  if (const char* automated_iso = std::getenv("LARECOMP_INSTALL_ISO");
-      automated_iso != nullptr && *automated_iso != '\0') {
-    std::atomic<uint64_t> copied_bytes{0};
-    std::atomic<uint64_t> total_bytes{0};
-    std::string error;
-    REXLOG_INFO("Installing MCLA: CE game files from LARECOMP_INSTALL_ISO={}", automated_iso);
-    if (!install(std::filesystem::path(automated_iso), copied_bytes, total_bytes, nullptr, error)) {
-      REXLOG_ERROR("Automated ISO installation failed: {}", error);
-      return false;
-    }
-    installed_paths = std::move(runtime_paths);
-    REXLOG_INFO("Automated ISO installation completed successfully");
-    return true;
-  }
-
-  ShowRexglueIsoInstallWizard(drawer, runtime_paths,
-                              [result](rex::PathConfig runtime_paths) mutable {
-                                result->paths = std::move(runtime_paths);
-                                result->ok = true;
-                                result->done = true;
-                              });
-
-  REXLOG_INFO("Entering rexglue ISO installer pump");
-  while (!result->done && !app_context.HasQuitFromUIThread()) {
-    app_context.ExecutePendingFunctionsFromUIThread();
-
-    app_context.PumpEvents();
-
-    if (app_context.HasQuitFromUIThread()) {
-      break;
-    }
-    if (window) {
-      window->RequestPaint();
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(8));
-  }
-
-  if (!result->ok) {
-    REXLOG_INFO("Leaving rexglue ISO installer pump without installation");
+bool TryAutomatedIsoInstall(const rex::PathConfig& runtime_paths, bool& attempted) {
+  attempted = false;
+  const char* automated_iso = std::getenv("LARECOMP_INSTALL_ISO");
+  if (automated_iso == nullptr || *automated_iso == '\0') {
     return false;
   }
-
-  installed_paths = std::move(result->paths);
-  REXLOG_INFO("Leaving rexglue ISO installer pump after successful installation");
+  attempted = true;
+  std::atomic<uint64_t> copied_bytes{0};
+  std::atomic<uint64_t> total_bytes{0};
+  std::string error;
+  REXLOG_INFO("Installing MCLA: CE game files from LARECOMP_INSTALL_ISO={}", automated_iso);
+  if (!MakeIsoInstall(runtime_paths.game_data_root)(std::filesystem::path(automated_iso),
+                                                    copied_bytes, total_bytes, nullptr, error)) {
+    REXLOG_ERROR("Automated ISO installation failed: {}", error);
+    return false;
+  }
+  REXLOG_INFO("Automated ISO installation completed successfully");
   return true;
 }
 
