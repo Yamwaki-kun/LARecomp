@@ -644,6 +644,14 @@ class LarecompApp : public rex::ReXApp {
     // No window icon is set: the build ships no .ico, so the window keeps the
     // default one the window class provides.
 
+    // The F3 overlay's "Guest: FPS" line. Without a command processor nothing
+    // in the SDK counts guest frames, so the no-CP runtime supplies them from
+    // its own swap hook. Through the public ReXApp hook, which both the stock
+    // SDK and the fork have.
+    if (mcla::native_gfx::nocp::WantNoCommandProcessor()) {
+      SetGuestFrameStats([] { return mcla::native_gfx::nocp::GuestFrameStats(); });
+    }
+
     // Mods and custom music are built here rather than from InitHooks so the
     // work can happen off the UI thread with a progress popup over the window.
     // It still lands before the guest runs, which is all the archive mount

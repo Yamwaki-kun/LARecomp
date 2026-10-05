@@ -32,6 +32,7 @@
 #include <memory>
 
 namespace rex::ui {
+struct FrameStats;
 class ImGuiDrawer;
 class ImmediateDrawer;
 class Presenter;
@@ -83,6 +84,12 @@ void NoteHook(const char* name);
 // is missing or simply never reached.
 void NoteFrameEnd();
 void NoteSwapCall();
+
+// The guest frame timing measured at the swap, for the F3 overlay
+// (ReXApp::SetGuestFrameStats). The SDK's own numbers come from the command
+// processor's swap packet, which does not exist in this mode; frame_count stays
+// 0 until the guest has swapped twice, which the overlay reads as "no data".
+rex::ui::FrameStats GuestFrameStats();
 
 // The provider and presenter this mode owns, for the native renderer to attach
 // to. Both are null until AttachPresentation has run.

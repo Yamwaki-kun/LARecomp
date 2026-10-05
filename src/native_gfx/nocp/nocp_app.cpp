@@ -13,6 +13,7 @@
 #include <rex/ui/d3d12/d3d12_provider.h>
 #include <rex/ui/imgui_drawer.h>
 #include <rex/ui/immediate_drawer.h>
+#include <rex/ui/overlay/debug_overlay.h>
 #include <rex/ui/presenter.h>
 #include <rex/ui/window.h>
 
@@ -40,6 +41,29 @@ REXCVAR_DEFINE_BOOL(
     "and querying it by name would silently answer false whatever it was set to.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+// The fork's SDK also takes the swap timing into rex::perf, for the counter
+// half of its overlay; the stock SDK has no such call and gets the numbers
+// through GuestFrameStats() alone. The template below loses overload
+// resolution to a real rex::perf::SetFrameStats taking the same arguments, so
+// it is only ever picked when the SDK has none.
+//
+// Both, and the call, sit at global scope on purpose. A using-directive makes
+// names visible as if declared in the nearest namespace enclosing both the
+// directive and the nominated namespace -- the global one for rex::perf -- and
+// unqualified lookup stops at the first scope that has the name at all. With
+// the fallback inside mcla::native_gfx::nocp, lookup found it there and never
+// reached rex::perf: the fork's counters stayed at 0.
+namespace larecomp_sdk_compat {
+template <typename... Args>
+void SetFrameStats(Args&&...) {}
+}  // namespace larecomp_sdk_compat
+
+static void PublishPerfFrameStats(int64_t frame_us, int64_t fps) {
+  using namespace larecomp_sdk_compat;
+  using namespace rex::perf;
+  SetFrameStats(frame_us, fps);
+}
+
 namespace mcla::native_gfx::nocp {
 
 namespace {
@@ -60,6 +84,13 @@ std::atomic<const char*> g_last_hook{nullptr};
 std::atomic<uint64_t> g_hook_calls{0};
 std::atomic<uint64_t> g_frame_ends{0};
 std::atomic<uint64_t> g_swaps{0};
+
+// Last swap-to-swap interval, written by the guest thread at the swap and read
+// by the overlay on the UI thread. Two separate relaxed atomics can tear by one
+// frame, which a once-per-host-frame readout cannot show.
+std::atomic<double> g_frame_time_ms{0.0};
+std::atomic<double> g_fps{0.0};
+std::atomic<uint64_t> g_timed_frames{0};
 }  // namespace
 
 void NoteHook(const char* name) {
@@ -83,12 +114,12 @@ void NoteSwapCall() {
 
   // Publish the frame timing the F3 "Debug Frames" overlay reads.
   //
-  // rex::perf::SetFrameStats has exactly one caller in the SDK:
-  // src/graphics/command_processor.cpp:1404, on the swap packet. That is the
+  // The SDK measures it on the command processor's swap packet. That is the
   // emulator, so in this mode nothing publishes and the overlay shows nothing
-  // -- the counters left with the command processor. The swap is still the
+  // -- the numbers left with the command processor. The swap is still the
   // frame boundary though, and this hook is on it, so the numbers can simply
-  // come from here instead.
+  // come from here instead: GuestFrameStats() hands them to the overlay through
+  // ReXApp::SetGuestFrameStats.
   static uint64_t last_tick = 0;
   const uint64_t freq = rex::chrono::Clock::QueryHostTickFrequency();
   const uint64_t now = rex::chrono::Clock::QueryHostTickCount();
@@ -96,9 +127,20 @@ void NoteSwapCall() {
     const uint64_t delta = now - last_tick;
     const int64_t frame_us = int64_t(delta * 1000000ull / freq);
     const int64_t fps = int64_t(freq / delta);
-    rex::perf::SetFrameStats(frame_us, fps);
+    g_frame_time_ms.store(double(delta) * 1000.0 / double(freq), std::memory_order_relaxed);
+    g_fps.store(double(freq) / double(delta), std::memory_order_relaxed);
+    g_timed_frames.fetch_add(1, std::memory_order_relaxed);
+    PublishPerfFrameStats(frame_us, fps);
   }
   last_tick = now;
+}
+
+rex::ui::FrameStats GuestFrameStats() {
+  rex::ui::FrameStats stats;
+  stats.frame_time_ms = g_frame_time_ms.load(std::memory_order_relaxed);
+  stats.fps = g_fps.load(std::memory_order_relaxed);
+  stats.frame_count = g_timed_frames.load(std::memory_order_relaxed);
+  return stats;
 }
 uint64_t FrameEndCount() { return g_frame_ends.load(std::memory_order_relaxed); }
 uint64_t SwapCount() { return g_swaps.load(std::memory_order_relaxed); }
