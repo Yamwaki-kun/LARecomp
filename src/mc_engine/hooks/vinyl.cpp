@@ -146,17 +146,10 @@ static std::atomic<uint32_t> g_vinyl_player{0};
 
 // Windowed GPU readback around vinyl (re)composites. MCLA builds the car's decal
 // texture on the CPU from a GPU composite; without readback the CPU reads stale
-// physical RAM, so vinyls only show inside the Vinyl Editor. We flip
-// d3d12_readback_resolve on for ~1.5s around each regen (the composite + CPU copy
-// finish well within that), then off again — so racing keeps full performance.
-static std::atomic<int64_t> g_vinyl_rb_deadline_ns{0};
-static std::atomic_bool g_vinyl_rb_forced{false};
-
-static int64_t NowNs() {
-    return std::chrono::duration_cast<std::chrono::nanoseconds>(
-               std::chrono::steady_clock::now().time_since_epoch())
-        .count();
-}
+// physical RAM, so vinyls only show inside the Vinyl Editor. The global readback
+// is held on for ~1.5s around each regen (the composite + CPU copy finish well
+// within that), then off again -- so racing keeps full performance. The window
+// itself is readback_window.cpp's, shared with photo mode.
 
 // Returns whether the guest vinyl composite is still running. The per-frame
 // driver sub_8235AC78 advances a state machine on the car-model flags
@@ -187,18 +180,12 @@ static bool VinylCompositeBusy() {
            rd8(car + 608) || rd8(car + 6486);
 }
 
-// Called from the regen hook: (re)arm the readback window. Only manages the cvar
-// when the user hasn't already turned global readback on themselves.
+// Called from the regen hook: (re)arm the readback window.
 static void ArmVinylReadbackWindow() {
     if (!REXCVAR_GET(vinyl_auto_readback)) return;
-    if (!g_vinyl_rb_forced.load(std::memory_order_relaxed)) {
-        if (rex::cvar::GetFlagByName("d3d12_readback_resolve") == "true") return;  // user's choice
-        rex::cvar::SetFlagByName("d3d12_readback_resolve", "true");
-        g_vinyl_rb_forced.store(true, std::memory_order_relaxed);
-    }
     // Generous bridge until the state machine spins up; TickVinylReadbackWindow
     // then keeps it alive for as long as the composite actually runs.
-    g_vinyl_rb_deadline_ns.store(NowNs() + 2'000'000'000LL, std::memory_order_relaxed);  // +2s
+    HoldGlobalReadback(ReadbackClient::kVinyl, 2'000'000'000LL);  // +2s
 }
 
 // Called every frame from Patch_DeltaTimePre. Runs regardless of how the
@@ -209,17 +196,7 @@ static void ArmVinylReadbackWindow() {
 // racing (flags stay 0 when no vinyl work is queued).
 void TickVinylReadbackWindow() {
     if (VinylCompositeBusy() && REXCVAR_GET(vinyl_auto_readback)) {
-        if (!g_vinyl_rb_forced.load(std::memory_order_relaxed) &&
-            rex::cvar::GetFlagByName("d3d12_readback_resolve") != "true") {
-            rex::cvar::SetFlagByName("d3d12_readback_resolve", "true");
-            g_vinyl_rb_forced.store(true, std::memory_order_relaxed);
-        }
-        g_vinyl_rb_deadline_ns.store(NowNs() + 1'500'000'000LL, std::memory_order_relaxed);
-    }
-    if (g_vinyl_rb_forced.load(std::memory_order_relaxed) &&
-        NowNs() >= g_vinyl_rb_deadline_ns.load(std::memory_order_relaxed)) {
-        rex::cvar::SetFlagByName("d3d12_readback_resolve", "false");
-        g_vinyl_rb_forced.store(false, std::memory_order_relaxed);
+        HoldGlobalReadback(ReadbackClient::kVinyl, 1'500'000'000LL);  // +1.5s
     }
 }
 

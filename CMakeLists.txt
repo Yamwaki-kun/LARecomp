@@ -42,6 +42,7 @@ set(LARECOMP_SOURCES
     src/mc_engine/hooks/vinyl.cpp
     src/mc_engine/hooks/vinyl_shapes.cpp
     src/mc_engine/hooks/photo_mode.cpp
+    src/mc_engine/hooks/readback_window.cpp
     src/mc_engine/hooks/mods.cpp
     src/mc_engine/hooks/discord.cpp
     src/mc_engine/hooks/diagnostics.cpp

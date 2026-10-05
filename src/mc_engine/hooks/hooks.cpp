@@ -148,6 +148,7 @@ void InitHooks() {
 // here is the per-frame housekeeping.
 void Patch_DeltaTimePre() {
     TickVinylReadbackWindow();  // runs every frame regardless of real_frame_delta
+    TickGlobalReadback();       // closes the vinyl / photo readback window once both are done
     TickVinylShapeCapture();    // hands-free shape-catalog sweep, if requested
     TickButtonPrompts();        // picks up a live button_prompts change
     TickCustomMusic();          // custom radio: volume + end-of-track advance
