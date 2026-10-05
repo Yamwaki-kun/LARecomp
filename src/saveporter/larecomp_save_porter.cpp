@@ -98,16 +98,26 @@ std::string XuidHex() {
   return buf;
 }
 
-// Directory the content store keys the local profile under. Mirrors
-// ContentManager::ProfileDirName: the XUID stays fixed, but the on-disk folder
-// follows the sanitized profile name (falling back to the hex XUID only when no
-// usable name is configured). The wizard runs before the runtime exists, so the
-// name is derived from the user_name cvar directly, exactly like UserProfile
-// does when the kernel later builds the same path.
-std::string ProfileDirName() {
-  std::string name = rex::system::xam::UserProfile::ConfiguredName();
-  return name.empty() ? XuidHex() : name;
+// Directory the content store keys the local profile under, which differs by
+// SDK. The wizard runs before the runtime exists, so it has to work this out the
+// same way the kernel will later:
+//   - the fork's ContentManager::ProfileDirName files content under the
+//     sanitized profile name (the user_name cvar, via the static
+//     UserProfile::ConfiguredName), falling back to the hex XUID;
+//   - the stock SDK has neither, and ContentManager::ResolvePackageRoot always
+//     uses the hex XUID.
+// Detected at compile time so one source builds against both.
+template <typename Profile>
+std::string ProfileDirNameFor() {
+  if constexpr (requires { Profile::ConfiguredName(); }) {
+    std::string name = Profile::ConfiguredName();
+    return name.empty() ? XuidHex() : name;
+  } else {
+    return XuidHex();
+  }
 }
+
+std::string ProfileDirName() { return ProfileDirNameFor<rex::system::xam::UserProfile>(); }
 
 bool ReadFileBytes(const fs::path& path, std::vector<uint8_t>& out) {
 #if defined(_WIN32)
