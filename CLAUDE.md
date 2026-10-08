@@ -108,6 +108,9 @@ Relato do Arnaldo: (1) **reflexo às vezes fica com a cor do semáforo**; (2) **
 - O Canary usa **o mesmo algoritmo** de A2C (mesmos limiares 0.75/0.25/0.5/1.0 e o mesmo offset por pixel 2x2). Não há correção pronta lá.
 - O jogo roda a 720p com **2x MSAA** (ver `Patch_SingleTile` em `larecomp_config.toml`). Com 2x, o A2C só dá 3 níveis por pixel (0, ½, 1) mais o dithering 2x2 que o próprio jogo pede (offsets em `RB_COLORCONTROL`). No console isso some na TV a 720p; aqui fica cru, ainda mais ampliado para a tela.
 - Próximos testes sem código: `resolution_scale` 2x (o dithering fica em pixels do host, então fica 2x mais fino) e FXAA nativo (`mcla_native_gfx_fxaa`). Se não bastar: opção no ReXGlue para A2C sem dithering ou com A2C nativo do host.
+- **Resultado: `resolution_scale = 2` melhorou muito a vegetação** (o dithering fica fino demais para aparecer). FPS em 2x ainda não medido. Fica salvo em `out/build/win-amd64-relwithdebinfo/larecomp.toml` (gravado pelo menu, junto com `d3d12_async_submission`, `clear_memory_page_state=false` etc.).
+- FXAA no caminho emulado: `--swap_post_effect=fxaa|fxaa_extreme` (cvar do ReXGlue, fora do menu). O "FXAA" da aba RENDERER OPTIONS é só do renderer nativo.
+- `timing_20261008_013913` é a execução com ROV (43,8 de média, p10 15).
 - Reflexo: precisa de captura (RenderDoc; o LARecomp tem `src/native_gfx/d3d12/renderdoc_hook.cpp`).
 
 ## Filtros e resolução (passo 3)
