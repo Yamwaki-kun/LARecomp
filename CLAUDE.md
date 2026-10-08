@@ -149,6 +149,17 @@ Cvar nova `d3d12_async_submission` (padrão `false`, experimental) em `rexglue-s
   **Sem glitches novos** com a flag (verificado pelo Arnaldo). Candidata a ser ligada por padrão e enviada upstream.
 - Risco conhecido: comandos gravados que referenciam descritores **CPU** transitórios, reescritos antes da thread executar. Se aparecer glitch só com a flag ligada, a suspeita começa por aí.
 
+## Mudança 2 no ReXGlue: RequestRanges sem trava no caminho comum (em teste)
+
+Profile com foco (`profile_20261008_012442`, 54,3 FPS, com async): `RequestRanges` = 23% das amostras da GPU Commands. Dentro dele: `UploadRanges` 40%, **`Mtx_lock` 34%** (`global_critical_region`, disputada com as threads do jogo), **alocação do `std::vector` 12%**. Chamadas vêm de `RequestRange` (95%): índices via `PrimitiveProcessor::Process` (~11% da thread) e vértices no `IssueDraw`.
+
+Mudança em `shared_memory.h/.cpp`:
+- `AreRangesValidLockFree()`: confere os bits de `system_page_flags_valid_` com `atomic_ref` (acquire), sem pegar a trava. Se todas as páginas já são válidas, retorna na hora.
+- `request_ranges_merged_`: vetor persistente no lugar do `std::vector` local.
+- **Resultado (`timing_20261008_012837`, com async):** média de 57,6 FPS, mín. 41, p10 51. Antes (teste B, `010822`): 55,0 / 36 / 46. **+5% na média, +11% no p10.** Sem glitches de geometria (verificado pelo Arnaldo).
+- Acumulado desde o início (DLLs oficiais, 00:45): 47,1 → 57,6 de média (+22%); p10 37 → 51 (+38%).
+- Raciocínio de segurança: os bits só são escritos sob a trava, e a página é invalidada (no handler da falta de página) **antes** da escrita do guest, então uma escrita ordenada antes do draw é sempre vista.
+
 ## Multithread
 
 - O jogo já é multithread (o Xbox 360 tem 3 núcleos e 6 threads), mas no PC só ~2,8 de 12 núcleos são usados.
