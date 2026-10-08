@@ -97,6 +97,14 @@ Hipótese principal: o README diz que o autor usa um ReXGlue **customizado e nã
   Atenção: o nome certo é `submit_on_primary_buffer_end` (cvar do LARecomp, [graphics.cpp:61](src/mc_engine/hooks/graphics.cpp#L61)). Passar `--d3d12_...` direto não funciona, porque o `larecomp_app.h` sobrescreve.
 - **Conclusão: as flags não chegam a 60 FPS.** O teto é a thread GPU Commands do ReXGlue.
 
+## Glitches gráficos (passo 2, em investigação)
+
+Relato do Arnaldo: (1) **reflexo às vezes fica com a cor do semáforo**; (2) **vegetação "não fica legal"** (o dithered alpha conhecido; ver `documentation/TECHNICAL_NOTES.md:198`).
+- A doc do LARecomp diz que os reflexos e os glitches do HUD foram corrigidos no ReXGlue **privado** do autor; o SDK público não tem essa correção.
+- Vegetação: o jogo usa alpha-to-mask (A2C). No caminho RTV, o ReXGlue emula isso com um padrão de dithering por pixel (`dxbc_translator_om.cpp:1712`, `CompletePixelShader_AlphaToMask`).
+- Xenia Canary clonado (raso, só leitura) em `../xenia-canary-src` para comparar. O Canary tem a cvar `xenos_sample_positions` (MSAA nas posições de amostra do Xenos), que o ReXGlue não tem.
+- Teste 1: `--render_target_path_d3d12=rov` (EDRAM emulada com precisão; o padrão em NVIDIA é RTV).
+
 ## Filtros e resolução (passo 3)
 
 Já existe no menu de pausa ([pause_menu.cpp:853](src/mc_engine/pause_menu.cpp#L853) e linhas ~930–1031):
