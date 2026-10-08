@@ -76,3 +76,5 @@ Thumbs.db
 # version. Nothing in the directory is tracked.
 src/assets/
 translations/
+# Local ReXGlue SDK install (see CLAUDE.md)
+req/
