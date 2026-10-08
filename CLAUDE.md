@@ -112,7 +112,12 @@ Relato do Arnaldo: (1) **reflexo às vezes fica com a cor do semáforo**; (2) **
 - **Resultado: `resolution_scale = 2` melhorou muito a vegetação** (o dithering fica fino demais para aparecer). FPS em 2x ainda não medido. Fica salvo em `out/build/win-amd64-relwithdebinfo/larecomp.toml` (gravado pelo menu, junto com `d3d12_async_submission`, `clear_memory_page_state=false` etc.).
 - FXAA no caminho emulado: `--swap_post_effect=fxaa|fxaa_extreme` (cvar do ReXGlue, fora do menu). O "FXAA" da aba RENDERER OPTIONS é só do renderer nativo.
 - `timing_20261008_013913` é a execução com ROV (43,8 de média, p10 15).
-- Reflexo: precisa de captura (RenderDoc; o LARecomp tem `src/native_gfx/d3d12/renderdoc_hook.cpp`).
+- **Reflexo: causa encontrada com RenderDoc** (captura `captures/reflexo_capture.rdc`, F11):
+  - A lataria (evento 14326) lê um **panorama 360° do ambiente** (textura 1024x512 R16F, `11658`), gerado no passe 1101–2827 (viewport 1024x512), além de um mapa borrado 128x64 (`11660`).
+  - No panorama, o semáforo aparece como **três quadrados enormes** (verde/amarelo/vermelho). São os halos de luz (ex.: evento 2008, 2 triângulos), desenhados com blend **MAX**, `SrcAlpha * src` e `One * dst`. O shader sai com alpha ~0,012 nas bordas do halo.
+  - O D3D12 **ignora os fatores** em MIN/MAX, então o quadrado inteiro sai opaco. No Xenos os fatores são aplicados (é o único jeito de o halo virar um ponto). Os caminhos RTV e ROV do ReXGlue também ignoram os fatores (por isso o ROV não resolveu).
+  - Correção (mudança 3 no ReXGlue): flags `kSysFlag_MinMaxColor{0-3}SrcAlpha` / `kSysFlag_MinMaxAlpha{0-3}SrcAlpha` (no fim do enum, em `dxbc_translator.h`); ligadas em `UpdateSystemConstantValues` quando o blend é MIN/MAX com fator de origem SrcAlpha (só no RTV); `CompletePixelShader_WriteToRTVs` multiplica rgb (e/ou a) pelo alpha antes de escrever. Fator de destino ≠ One não é emulável assim (precisaria da cor de destino).
+- Scripts de análise do RenderDoc (Python, rodam via `qrenderdoc.exe --python`) ficaram na pasta temporária da sessão: dump de ações, salvar textura como PNG, histórico de pixel, PickPixel, SRVs de um evento, estado de blend. (RenderDoc; o LARecomp tem `src/native_gfx/d3d12/renderdoc_hook.cpp`).
 
 ## Filtros e resolução (passo 3)
 
