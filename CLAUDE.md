@@ -103,7 +103,12 @@ Relato do Arnaldo: (1) **reflexo às vezes fica com a cor do semáforo**; (2) **
 - A doc do LARecomp diz que os reflexos e os glitches do HUD foram corrigidos no ReXGlue **privado** do autor; o SDK público não tem essa correção.
 - Vegetação: o jogo usa alpha-to-mask (A2C). No caminho RTV, o ReXGlue emula isso com um padrão de dithering por pixel (`dxbc_translator_om.cpp:1712`, `CompletePixelShader_AlphaToMask`).
 - Xenia Canary clonado (raso, só leitura) em `../xenia-canary-src` para comparar. O Canary tem a cvar `xenos_sample_positions` (MSAA nas posições de amostra do Xenos), que o ReXGlue não tem.
-- Teste 1: `--render_target_path_d3d12=rov` (EDRAM emulada com precisão; o padrão em NVIDIA é RTV).
+- Teste 1: `--render_target_path_d3d12=rov` (EDRAM emulada com precisão; o padrão em NVIDIA é RTV). **Resultado: não resolveu nenhum dos dois e causou muito stutter. Descartado.**
+- Print (Sunset Blvd., pôr do sol): copa da árvore com padrão de pontos por pixel bem visível; lateral traseira direita do carro com faixa vermelha/magenta (cor do semáforo).
+- O Canary usa **o mesmo algoritmo** de A2C (mesmos limiares 0.75/0.25/0.5/1.0 e o mesmo offset por pixel 2x2). Não há correção pronta lá.
+- O jogo roda a 720p com **2x MSAA** (ver `Patch_SingleTile` em `larecomp_config.toml`). Com 2x, o A2C só dá 3 níveis por pixel (0, ½, 1) mais o dithering 2x2 que o próprio jogo pede (offsets em `RB_COLORCONTROL`). No console isso some na TV a 720p; aqui fica cru, ainda mais ampliado para a tela.
+- Próximos testes sem código: `resolution_scale` 2x (o dithering fica em pixels do host, então fica 2x mais fino) e FXAA nativo (`mcla_native_gfx_fxaa`). Se não bastar: opção no ReXGlue para A2C sem dithering ou com A2C nativo do host.
+- Reflexo: precisa de captura (RenderDoc; o LARecomp tem `src/native_gfx/d3d12/renderdoc_hook.cpp`).
 
 ## Filtros e resolução (passo 3)
 
