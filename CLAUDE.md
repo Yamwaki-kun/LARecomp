@@ -1,7 +1,20 @@
 # LARecomp: notas de trabalho
 
 Contexto e progresso do trabalho local nesta cópia do LARecomp (recomp estático de Midnight Club: LA para PC via ReXGlue).
-O upstream é https://github.com/mzzvxm/larecomp. Esta pasta é um ZIP, **não é um repositório git**. Para contribuir: fork + clone e depois trazer as mudanças para cá.
+
+## Git
+
+**Commits só no nome do Arnaldo. Nunca adicionar Claude como co-autor.**
+
+| Repositório | Pasta | `origin` (fork) | `upstream` | Branch de trabalho |
+|---|---|---|---|---|
+| LARecomp | esta pasta | https://github.com/Yamwaki-kun/LARecomp | https://github.com/mzzvxm/larecomp (`main`) | `trabalho` |
+| ReXGlue | `../rexglue-src` | https://github.com/Yamwaki-kun/rexglue-sdk | https://github.com/rexglue/rexglue-sdk (`main`) | `async-submission` |
+
+- A pasta do LARecomp era um ZIP idêntico ao `upstream/main` (commit `23b91be`); o git foi iniciado em cima dela.
+- `rexglue-src` é um clone raso (`--depth 1`) da tag `v0.10.0` (`f5337cd`), 2 commits atrás do `upstream/main`. Esses 2 commits não tocam nos arquivos alterados.
+- Não commitar no `rexglue-src` as mudanças em `thirdparty/libmspack` e `thirdparty/moltenvk` (correção local dos symlinks no Windows).
+- Um commit por assunto. O que é útil para o projeto original fica em commits separados das configurações locais e das notas, para virar PR com cherry-pick.
 
 ## Plano (em ordem)
 
