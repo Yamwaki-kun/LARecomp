@@ -117,7 +117,10 @@ Relato do Arnaldo: (1) **reflexo às vezes fica com a cor do semáforo**; (2) **
   - No panorama, o semáforo aparece como **três quadrados enormes** (verde/amarelo/vermelho). São os halos de luz (ex.: evento 2008, 2 triângulos), desenhados com blend **MAX**, `SrcAlpha * src` e `One * dst`. O shader sai com alpha ~0,012 nas bordas do halo.
   - O D3D12 **ignora os fatores** em MIN/MAX, então o quadrado inteiro sai opaco. No Xenos os fatores são aplicados (é o único jeito de o halo virar um ponto). Os caminhos RTV e ROV do ReXGlue também ignoram os fatores (por isso o ROV não resolveu).
   - Correção (mudança 3 no ReXGlue): flags `kSysFlag_MinMaxColor{0-3}SrcAlpha` / `kSysFlag_MinMaxAlpha{0-3}SrcAlpha` (no fim do enum, em `dxbc_translator.h`); ligadas em `UpdateSystemConstantValues` quando o blend é MIN/MAX com fator de origem SrcAlpha (só no RTV); `CompletePixelShader_WriteToRTVs` multiplica rgb (e/ou a) pelo alpha antes de escrever. Fator de destino ≠ One não é emulável assim (precisaria da cor de destino).
-- Scripts de análise do RenderDoc (Python, rodam via `qrenderdoc.exe --python`) ficaram na pasta temporária da sessão: dump de ações, salvar textura como PNG, histórico de pixel, PickPixel, SRVs de um evento, estado de blend. (RenderDoc; o LARecomp tem `src/native_gfx/d3d12/renderdoc_hook.cpp`).
+  - **Resultado: reflexo corrigido, sem efeitos colaterais visíveis** (testado pelo Arnaldo, 2026-10-08). Commit `aead415` no `rexglue-src`.
+- Scripts de análise do RenderDoc: `scripts/renderdoc/` (ver `LEIAME.md` lá).
+
+**Status do passo 2: os dois glitches relatados estão resolvidos** (vegetação com `resolution_scale = 2`; reflexo com a mudança 3). (RenderDoc; o LARecomp tem `src/native_gfx/d3d12/renderdoc_hook.cpp`).
 
 ## Filtros e resolução (passo 3)
 
