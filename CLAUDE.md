@@ -125,6 +125,8 @@ Relato do Arnaldo: (1) **reflexo às vezes fica com a cor do semáforo**; (2) **
   - **Resultado: reflexo corrigido, sem efeitos colaterais visíveis** (testado pelo Arnaldo, 2026-10-08). Commit `aead415` no `rexglue-src`.
 - Scripts de análise do RenderDoc: `scripts/renderdoc/` (ver `LEIAME.md` lá).
 
+- **Bug novo (relato do Arnaldo, 2026-10-08): o farol do carro às vezes dá uma piscada** onde a luz bate. A investigar (capturar com F11 no momento da piscada).
+
 **Status do passo 2: os dois glitches relatados estão resolvidos** (vegetação com `resolution_scale = 2`; reflexo com a mudança 3). (RenderDoc; o LARecomp tem `src/native_gfx/d3d12/renderdoc_hook.cpp`).
 
 ## Filtros e resolução (passo 3)
@@ -200,6 +202,14 @@ Mudança em `shared_memory.h/.cpp`:
 - Maior custo isolado restante: `MakeRangeValid` → `EnableAccessCallbacks` → `VirtualProtect`, ~10% da thread. As chamadas já são agrupadas e só protegem páginas ainda não protegidas; o custo vem do ciclo proteger → falta de página → re-upload em geometria dinâmica. O `Protect` roda **segurando a trava global** (`xmemory.cpp:2103`), o que também trava as threads do jogo.
 - Outros: `UpdateBindings` 11%, `RequestTextures` 9% (`FindOrCreateTexture` 28% dele; `CreateTexture` esperando o driver), `PrimitiveProcessor` 8%, `WriteRegister` 9%.
 - Ideias para depois: fazer o `Protect` fora da trava global; tratar páginas "quentes" sem proteção (cuidado: buffers dinâmicos tipo ring dentro da mesma submissão).
+
+## Rodada 2 de desempenho (2x + ultrawide, sem limite de FPS)
+
+`perfil.ps1 -SemLimite` (`timing_20261008_024115_cap0`): **média de 58,2 FPS, mín. 42, p10 46, máx. 83**. O Arnaldo suspeita do tráfego de carros.
+- Thread de render do jogo (`F80004DC`) a 97%, mas **~43% dela é espera** em `grcDevice_EndFrame` → `D3DDevice_Swap` → `D3DDevice_BlockOnFence` (esperando a GPU Commands).
+- GPU Commands a 85%: `RequestTextures` **18%** (`FindOrCreateTexture` 11,6%, **`IsRangeScaledResolved` 6,8%**, custo da escala 2x), `RequestRanges` 11,6%, `VirtualProtect` 8,5%, `Cnd_wait` 7,7% (espera do async no swap), `UpdateBindings` 11,7%.
+- Mudança 4 no ReXGlue: `IsRangeScaledResolved` sem a trava global (atomic_ref, mesmo raciocínio da mudança 2) e os 3 `std::vector` do `RequestTextures` viraram membros reaproveitados.
+- O cache de bindings de textura é zerado inteiro (`ResetTextureBindings`) sempre que **qualquer** textura fica desatualizada (`texture_became_outdated_`). Com reflexos, sombras e resolves todo quadro, isso força `FindOrCreateTexture` em todos os draws. Candidato a otimização: invalidar só os bindings da textura afetada.
 
 ## Multithread
 
