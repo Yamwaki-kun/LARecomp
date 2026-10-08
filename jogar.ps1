@@ -2,8 +2,9 @@
 # Abre o LARecomp com as configurações que mediram melhor (ver CLAUDE.md).
 # Uso:  powershell -ExecutionPolicy Bypass -File .\jogar.ps1          (normal)
 #       powershell -ExecutionPolicy Bypass -File .\jogar.ps1 -Medir   (grava logs/timing_*.log)
+#       powershell -ExecutionPolicy Bypass -File .\jogar.ps1 -Extra "--flag=valor","--outra=valor"
 
-param([switch]$Medir)
+param([switch]$Medir, [string[]]$Extra = @())
 
 $BuildDir = Join-Path $PSScriptRoot "out\build\win-amd64-relwithdebinfo"
 if (-not (Test-Path (Join-Path $BuildDir "larecomp.exe"))) {
@@ -20,6 +21,6 @@ $flags = @(
     "--clear_memory_page_state=false",      # menos travadas fortes
     "--submit_on_primary_buffer_end=true",  # divide o quadro em vários blocos (necessário para o async)
     "--d3d12_async_submission=true"         # thread nova de submissão (só no nosso ReXGlue)
-)
+) + $Extra
 
 Start-Process -FilePath (Join-Path $BuildDir "larecomp.exe") -WorkingDirectory $BuildDir -ArgumentList $flags
