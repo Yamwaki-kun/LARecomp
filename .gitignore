@@ -78,3 +78,7 @@ src/assets/
 translations/
 # Local ReXGlue SDK install (see CLAUDE.md)
 req/
+
+# RenderDoc captures
+captures/
+*.rdc
