@@ -129,6 +129,9 @@ Relato do Arnaldo: (1) **reflexo às vezes fica com a cor do semáforo**; (2) **
 
 ## Filtros e resolução (passo 3)
 
+**Pendente (relato do Arnaldo, 2026-10-08): o FSR não está sendo aplicado.** Investigar depois (`present_effect` é `kRequiresRestart`; ver se o menu salva e se o presenter D3D12 usa o efeito).
+
+
 Já existe no menu de pausa ([pause_menu.cpp:853](src/mc_engine/pause_menu.cpp#L853) e linhas ~930–1031):
 - `resolution_scale` (RES SCALE)
 - upscaler/efeito: bilinear, CAS, FSR 1, FSR 2, FSR 3, com qualidade e nitidez
