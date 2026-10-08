@@ -113,6 +113,27 @@ double SlowFrameMs() {
     return ms;
 }
 
+// Substrings of symbol names to break down in the report: who calls each one
+// and what it spends its time in. Comma-separated, from MCLA_PROFILE_FOCUS,
+// for example "SharedMemory::RequestRanges,PrimitiveProcessor::Process".
+const std::vector<std::string>& FocusSymbols() {
+    static const std::vector<std::string> focus = [] {
+        std::vector<std::string> out;
+        if (const char* e = std::getenv("MCLA_PROFILE_FOCUS")) {
+            std::string s(e);
+            size_t start = 0;
+            while (start <= s.size()) {
+                size_t end = s.find(',', start);
+                if (end == std::string::npos) end = s.size();
+                if (end > start) out.emplace_back(s.substr(start, end - start));
+                start = end + 1;
+            }
+        }
+        return out;
+    }();
+    return focus;
+}
+
 struct Stack {
     uint32_t n = 0;
     uint64_t f[kMaxDepth] = {};
@@ -943,6 +964,54 @@ void WriteThreadSection(Resolver& resolve, const ThreadData& d, DWORD tid, doubl
         if (ic++ >= (detailed ? 40 : 15)) break;
         std::fprintf(g_log, "  %6.2f%%  %s\n", 100.0 * double(r.second) / double(d.stacks.size()),
                      r.first.c_str());
+    }
+
+    // Focus breakdown (MCLA_PROFILE_FOCUS). Frames run leaf first, so the
+    // callee of the outermost matching frame sits just below it and the caller
+    // is the first frame above that is not the focus function itself (which
+    // folds recursion and thin wrappers such as RequestRange -> RequestRanges).
+    for (const std::string& focus : FocusSymbols()) {
+        std::unordered_map<std::string, uint64_t> by_caller, by_callee;
+        uint64_t hits = 0;
+        for (const Stack& s : d.stacks) {
+            int outer = -1;
+            for (uint32_t i = 0; i < s.n; ++i) {
+                if (resolve(s.f[i]).sym.find(focus) != std::string::npos) outer = int(i);
+            }
+            if (outer < 0) continue;
+            hits++;
+            int inner = outer;
+            while (inner > 0 && resolve(s.f[inner - 1]).sym.find(focus) != std::string::npos) {
+                --inner;
+            }
+            std::string callee = "<self>";
+            if (inner > 0) {
+                const Resolved& r = resolve(s.f[inner - 1]);
+                callee = r.mod.empty() ? r.sym : r.mod + "!" + r.sym;
+            }
+            by_callee[callee]++;
+            std::string caller = "<root>";
+            if (uint32_t(outer + 1) < s.n) {
+                const Resolved& r = resolve(s.f[outer + 1]);
+                caller = r.mod.empty() ? r.sym : r.mod + "!" + r.sym;
+            }
+            by_caller[caller]++;
+        }
+        if (!hits) continue;
+        std::fprintf(g_log, "  focus '%s': %.2f%% of slow-frame stacks\n", focus.c_str(),
+                     100.0 * double(hits) / double(d.stacks.size()));
+        for (auto* table : {&by_caller, &by_callee}) {
+            std::fprintf(g_log, "    %s:\n", table == &by_caller ? "called from" : "spends time in");
+            std::vector<std::pair<std::string, uint64_t>> rows_f(table->begin(), table->end());
+            std::sort(rows_f.begin(), rows_f.end(),
+                      [](const auto& a, const auto& b) { return a.second > b.second; });
+            int fc = 0;
+            for (const auto& r : rows_f) {
+                if (fc++ >= 12) break;
+                std::fprintf(g_log, "    %6.2f%%  %s\n", 100.0 * double(r.second) / double(hits),
+                             r.first.c_str());
+            }
+        }
     }
 
     if (!detailed) return;
