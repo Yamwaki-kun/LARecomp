@@ -917,6 +917,34 @@ void WriteThreadSection(Resolver& resolve, const ThreadData& d, DWORD tid, doubl
                      r.first.c_str());
     }
 
+    // Inclusive time: every non-system function anywhere on the stack, counted
+    // once per sample. The leaf table charges driver and kernel time to the
+    // driver; this charges it to the code that made the call, which is what
+    // says where a thread's time actually goes.
+    std::unordered_map<std::string, uint64_t> inclusive;
+    std::vector<std::string> seen;
+    for (const Stack& s : d.stacks) {
+        seen.clear();
+        for (uint32_t i = 0; i < s.n; ++i) {
+            const Resolved& r = resolve(s.f[i]);
+            if (r.mod.empty() || IsSystemModule(r.mod)) continue;
+            std::string key = r.mod + "!" + r.sym;
+            if (std::find(seen.begin(), seen.end(), key) != seen.end()) continue;
+            inclusive[key]++;
+            seen.push_back(std::move(key));
+        }
+    }
+    std::vector<std::pair<std::string, uint64_t>> irows(inclusive.begin(), inclusive.end());
+    std::sort(irows.begin(), irows.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+    std::fprintf(g_log, "  slow-frame stacks: inclusive (function anywhere on the stack)\n");
+    int ic = 0;
+    for (const auto& r : irows) {
+        if (ic++ >= (detailed ? 40 : 15)) break;
+        std::fprintf(g_log, "  %6.2f%%  %s\n", 100.0 * double(r.second) / double(d.stacks.size()),
+                     r.first.c_str());
+    }
+
     if (!detailed) return;
 
     // Aggregating only the first non-system frame collapses every guest wait
