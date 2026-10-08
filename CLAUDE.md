@@ -21,7 +21,12 @@ Contexto e progresso do trabalho local nesta cópia do LARecomp (recomp estátic
 1. **Rodar a 60 FPS estável.** Hoje roda a ~30–42 FPS com instabilidade (ver Diagnóstico).
 2. **Resolver os glitches gráficos.** O principal conhecido é o dithered alpha em sombras e vegetação (ver README, "Known issues").
 3. **Aplicar filtros gráficos** (pós-processamento: nitidez, AA etc.).
-3b. **Suporte a ultrawide** (21:9 / 32:9): render e HUD na proporção certa, sem esticar. Pedido do Arnaldo (2026-10-08). Ponto de partida: o LARecomp já tem um patch de aspect ratio (`flt_8201E7EC`, ver README, "Access violation on the aspect ratio patch").
+3b. **Suporte a ultrawide** (21:9 / 32:9). Pedido do Arnaldo (2026-10-08); o monitor dele é **3440x1440**.
+   - **Funciona** com `--video_mode_width=1720 --aspect_ratio=auto` (o jogo acha que a TV é 1720x720 = 2,389:1; com `resolution_scale = 2` renderiza 3440x1440 nativo). Testado pelo Arnaldo com 21:9: sem bugs. Já está no `jogar.ps1`.
+   - `aspect_ratio = auto` (novo) = `video_mode_width / video_mode_height`. Hooks em `src/mc_engine/hooks/graphics.cpp`; o jogo calcula `largura = altura × 1,777` em `sub_82233E18` e o hook troca o 1,777. 3 dos 4 hooks disparam (o `82233EB4` não apareceu no log).
+   - Sem `aspect_ratio`, só o `video_mode_width` estica a imagem e gera artefatos.
+   - Pegadinha: `powershell -File jogar.ps1 -Extra "a","b"` entrega `"a,b"` como um texto só; o script separa nas vírgulas.
+   - A verificar: HUD/menus na proporção larga, cutscenes e vídeos.
 4. **Distribuir melhor o trabalho entre núcleos (multithread).** Ligado ao item 1, ver "Multithread" abaixo.
 5. **Se possível, consertar** o que esses filtros e glitches revelarem, mandando as correções upstream (LARecomp e/ou ReXGlue).
 

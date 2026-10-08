@@ -9,6 +9,7 @@
 #include <rex/system/xmemory.h>
 #include <atomic>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <string_view>
 
@@ -36,8 +37,10 @@ REXCVAR_DEFINE_DOUBLE(lod_city_scale, 1.0, "MCLA/LOD", "Escala de LOD da Cidade 
     .range(0.1, 10.0)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
-REXCVAR_DEFINE_STRING(aspect_ratio, "16:9", "MCLA/Patches", "Screen Aspect Ratio")
-    .allowed({"16:9", "16:10", "21:9", "32:9"})
+REXCVAR_DEFINE_STRING(aspect_ratio, "16:9", "MCLA/Patches",
+    "Screen Aspect Ratio. auto = video_mode_width / video_mode_height, so an ultrawide gets its "
+    "exact ratio (3440x1440 -> video mode 1720x720 -> 2.389).")
+    .allowed({"16:9", "16:10", "21:9", "32:9", "auto"})
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_BOOL(single_tile, false, "MCLA/Performance",
@@ -63,6 +66,19 @@ REXCVAR_DEFINE_BOOL(submit_on_primary_buffer_end, false, "MCLA/Performance",
     "Drive the SDK's d3d12_submit_on_primary_buffer_end. Ends a D3D12 submission at every PM4 "
     "primary buffer end instead of batching the frame. Measured ~7% slower on a GTX 1650.")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
+// The guest video mode's width over height, for aspect_ratio = auto. Falls back
+// to 16:9 if the cvars are missing or nonsensical.
+static double VideoModeAspect() {
+    int width = 0, height = 0;
+    try {
+        width = std::stoi(rex::cvar::GetFlagByName("video_mode_width"));
+        height = std::stoi(rex::cvar::GetFlagByName("video_mode_height"));
+    } catch (...) {
+    }
+    if (width <= 0 || height <= 0) return 16.0 / 9.0;
+    return double(width) / double(height);
+}
 
 // Function to apply/revert the Aspect Ratio patch in GPU memory
 void ApplyAspectRatioPatch(std::string_view ratio) {
@@ -90,6 +106,9 @@ void ApplyAspectRatioPatch(std::string_view ratio) {
         val = 0x40155555; // 21:9 (2.333333f)
     } else if (ratio == "32:9") {
         val = 0x40638E39; // 32:9 (3.555555f)
+    } else if (ratio == "auto") {
+        float aspect = float(VideoModeAspect());
+        std::memcpy(&val, &aspect, sizeof(val));
     }
 
     // Write the 4 bytes in Big-Endian at the correct address
@@ -115,6 +134,9 @@ static bool GetAspectRatio(double& out_val) {
         return true;
     } else if (ratio == "32:9") {
         out_val = 3.5555556;
+        return true;
+    } else if (ratio == "auto") {
+        out_val = VideoModeAspect();
         return true;
     }
     return false;
