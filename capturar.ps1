@@ -1,5 +1,7 @@
 # capturar.ps1
-# Abre o LARecomp pelo RenderDoc para capturar quadros (F12 ou Print Screen no jogo).
+# Abre o LARecomp pelo RenderDoc para capturar quadros.
+# F11 no jogo: captura exatamente 1 quadro do jogo (precisa do nosso ReXGlue).
+# F12: captura do próprio RenderDoc, que corta o quadro do jogo no meio.
 # As capturas vão para captures\reflexo_*.rdc (fora do git).
 # Uso:  powershell -ExecutionPolicy Bypass -File .\capturar.ps1
 
@@ -21,4 +23,5 @@ $env:REX_LOG_LEVEL = "warn"
     --working-dir $BuildDir `
     --capture-file (Join-Path $CaptureDir "reflexo") `
     (Join-Path $BuildDir "larecomp.exe") `
-    --gpu_debug_markers=true
+    --gpu_debug_markers=true `
+    --d3d12_renderdoc_capture_key=true

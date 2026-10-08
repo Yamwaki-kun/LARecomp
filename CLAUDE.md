@@ -21,6 +21,7 @@ Contexto e progresso do trabalho local nesta cópia do LARecomp (recomp estátic
 1. **Rodar a 60 FPS estável.** Hoje roda a ~30–42 FPS com instabilidade (ver Diagnóstico).
 2. **Resolver os glitches gráficos.** O principal conhecido é o dithered alpha em sombras e vegetação (ver README, "Known issues").
 3. **Aplicar filtros gráficos** (pós-processamento: nitidez, AA etc.).
+3b. **Suporte a ultrawide** (21:9 / 32:9): render e HUD na proporção certa, sem esticar. Pedido do Arnaldo (2026-10-08). Ponto de partida: o LARecomp já tem um patch de aspect ratio (`flt_8201E7EC`, ver README, "Access violation on the aspect ratio patch").
 4. **Distribuir melhor o trabalho entre núcleos (multithread).** Ligado ao item 1, ver "Multithread" abaixo.
 5. **Se possível, consertar** o que esses filtros e glitches revelarem, mandando as correções upstream (LARecomp e/ou ReXGlue).
 
