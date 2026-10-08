@@ -7,6 +7,7 @@
 #include <rex/ppc.h>
 #include <rex/runtime.h>
 #include <rex/system/xmemory.h>
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -120,16 +121,31 @@ static bool GetAspectRatio(double& out_val) {
 }
 
 
+// Logs the first time each aspect hook runs, with the value the game had
+// computed, so a hook that never fires (or fires with an unexpected value) is
+// visible at the default warn log level.
+static void LogAspectHookOnce(int index, const char* name, double game_value) {
+    static std::atomic<bool> logged[4];
+    if (!logged[index].exchange(true)) {
+        LARECOMP_APP_WARN("[aspect] {} fired, game value {:.4f}, cvar {}", name, game_value,
+                          REXCVAR_GET(aspect_ratio));
+    }
+}
+
 bool Patch_AspectRatio_82233EB4(PPCRegister& f0) {
+    LogAspectHookOnce(0, "82233EB4", f0.f64);
     return GetAspectRatio(f0.f64);
 }
 bool Patch_AspectRatio_82214BB8(PPCRegister& f10) {
+    LogAspectHookOnce(1, "82214BB8", f10.f64);
     return GetAspectRatio(f10.f64);
 }
 bool Patch_AspectRatio_822E5E68(PPCRegister& f12) {
+    LogAspectHookOnce(2, "822E5E68", f12.f64);
     return GetAspectRatio(f12.f64);
 }
 bool Patch_AspectRatio_8223E5E0(PPCRegister& f13) {
+    LogAspectHookOnce(3, "8223E5E0", f13.f64);
     return GetAspectRatio(f13.f64);
 }
 

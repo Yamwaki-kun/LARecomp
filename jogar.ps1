@@ -21,6 +21,9 @@ $flags = @(
     "--clear_memory_page_state=false",      # menos travadas fortes
     "--submit_on_primary_buffer_end=true",  # divide o quadro em vários blocos (necessário para o async)
     "--d3d12_async_submission=true"         # thread nova de submissão (só no nosso ReXGlue)
-) + $Extra
+)
+# Com "powershell -File", uma lista "a","b" chega como um texto só ("a,b"),
+# então separa nas vírgulas.
+$flags += $Extra | ForEach-Object { $_ -split ',' } | Where-Object { $_ }
 
 Start-Process -FilePath (Join-Path $BuildDir "larecomp.exe") -WorkingDirectory $BuildDir -ArgumentList $flags
