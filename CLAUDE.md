@@ -160,6 +160,14 @@ Mudança em `shared_memory.h/.cpp`:
 - Acumulado desde o início (DLLs oficiais, 00:45): 47,1 → 57,6 de média (+22%); p10 37 → 51 (+38%).
 - Raciocínio de segurança: os bits só são escritos sob a trava, e a página é invalidada (no handler da falta de página) **antes** da escrita do guest, então uma escrita ordenada antes do draw é sempre vista.
 
+## Profile depois das mudanças 1 e 2 (`profile_20261008_013119`)
+
+- 2ª janela de 30 s: **59,0 FPS (limite de 60)**, p99 23,6 ms, máx. 59 ms, mesmo com o profiler ligado.
+- CPU: GPU Commands **77%** (antes ~95%, não está mais saturada), `D3D12 Async Submit` 21% (trabalho que saiu da GPU Commands), thread de render do jogo 71%.
+- Maior custo isolado restante: `MakeRangeValid` → `EnableAccessCallbacks` → `VirtualProtect`, ~10% da thread. As chamadas já são agrupadas e só protegem páginas ainda não protegidas; o custo vem do ciclo proteger → falta de página → re-upload em geometria dinâmica. O `Protect` roda **segurando a trava global** (`xmemory.cpp:2103`), o que também trava as threads do jogo.
+- Outros: `UpdateBindings` 11%, `RequestTextures` 9% (`FindOrCreateTexture` 28% dele; `CreateTexture` esperando o driver), `PrimitiveProcessor` 8%, `WriteRegister` 9%.
+- Ideias para depois: fazer o `Protect` fora da trava global; tratar páginas "quentes" sem proteção (cuidado: buffers dinâmicos tipo ring dentro da mesma submissão).
+
 ## Multithread
 
 - O jogo já é multithread (o Xbox 360 tem 3 núcleos e 6 threads), mas no PC só ~2,8 de 12 núcleos são usados.
