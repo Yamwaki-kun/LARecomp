@@ -11,6 +11,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
@@ -53,6 +54,14 @@ REXCVAR_DEFINE_BOOL(vinyl_auto_readback, true, "MCLA/Garage",
     "briefly enables d3d12_readback_resolve for ~1.5s around each vinyl "
     "(re)composite (garage entry / edits) so decals appear everywhere, while "
     "keeping readback OFF during racing for full performance. Leave ON.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_BOOL(vinyl_scoped_readback, true, "MCLA/Garage",
+    "Perf: read back only the resolves that land in the vinyl composite texture "
+    "(IGraphicsSystem::RequestResolveReadback) instead of turning on the global "
+    "readback for ~2 s, which drains the GPU on every resolve and made the game "
+    "hitch when cars with vinyls streamed in. Falls back to the global readback "
+    "when the texture address can't be read. Off restores the global window.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 // Vinyl (decal) layer caps. MCLA stores car decals in a fixed 288-slot layer
@@ -180,12 +189,97 @@ static bool VinylCompositeBusy() {
            rd8(car + 608) || rd8(car + 6486);
 }
 
+// Physical address and size of the vinyl composite texture (r5 of the regen
+// entry). r5 is read as a D3DTexture -- fetch constant at +28, dword 0 type 2 --
+// and, failing that, as a grcTextureXenon whose D3DTexture pointer sits at +28.
+// Returns false when neither decodes, so the caller can fall back.
+static bool VinylTextureRange(uint32_t tex, uint32_t& base_out, uint32_t& size_out) {
+    auto* rt = rex::Runtime::instance();
+    if (!rt) return false;
+    auto* mem = rt->memory();
+    if (!mem) return false;
+    auto is_ptr = [](uint32_t ea) { return ea >= 0x10000u && ea < 0xFFFF0000u; };
+    auto rd32 = [&](uint32_t a) -> uint32_t {
+        const auto* b = mem->TranslateVirtual<const uint8_t*>(a);
+        return (uint32_t(b[0]) << 24) | (uint32_t(b[1]) << 16) | (uint32_t(b[2]) << 8) | b[3];
+    };
+    auto decode = [&](uint32_t d3d_texture) -> bool {
+        if (!is_ptr(d3d_texture)) return false;
+        uint32_t fetch0 = rd32(d3d_texture + 28);
+        if ((fetch0 & 3u) != 2u) return false;  // not a texture fetch constant
+        uint32_t base_ea = rd32(d3d_texture + 32) & 0xFFFFF000u;
+        if (!base_ea) return false;
+        uint32_t physical = mem->GetPhysicalAddress(base_ea);
+        if (physical == UINT32_MAX) return false;
+        // dword 2: width - 1 in bits 0-12, height - 1 in bits 13-25 (2D).
+        uint32_t size_word = rd32(d3d_texture + 36);
+        uint32_t width = (size_word & 0x1FFFu) + 1;
+        uint32_t height = ((size_word >> 13) & 0x1FFFu) + 1;
+        // 32 bpp, tiled to 32x32, plus mips, with slack for the three resolve
+        // bands of predicated tiling.
+        uint64_t bytes = uint64_t((width + 31) & ~31u) * ((height + 31) & ~31u) * 4;
+        bytes = bytes * 3 / 2;
+        bytes = std::clamp<uint64_t>(bytes, 64u * 1024u, 16u * 1024u * 1024u);
+        base_out = physical;
+        size_out = uint32_t(bytes);
+        return true;
+    };
+    if (decode(tex)) return true;
+    return is_ptr(tex) && decode(rd32(tex + 28));
+}
+
+// The scoped readback goes through the SDK's readback_resolve_ranges cvar (only
+// in our ReXGlue build): the SDK re-arms the range every frame while it is set.
+// g_scoped_deadline_ns is when this code clears it again; 0 = not set by us.
+static constexpr const char* kScopedReadbackFlag = "readback_resolve_ranges";
+static std::atomic<int64_t> g_scoped_deadline_ns{0};
+
+static int64_t VinylNowNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+// Keeps readback on for the vinyl composite for hold_ns more: scoped to the
+// composite texture when possible, the global window otherwise.
+static void HoldVinylReadback(int64_t hold_ns) {
+    if (REXCVAR_GET(vinyl_scoped_readback)) {
+        uint32_t base = 0, size = 0;
+        if (VinylTextureRange(g_vinyl_tex.load(std::memory_order_relaxed), base, size)) {
+            char range[48];
+            std::snprintf(range, sizeof(range), "0x%08X:0x%X", base, size);
+            if (rex::cvar::SetFlagByName(kScopedReadbackFlag, range)) {
+                int64_t deadline = VinylNowNs() + hold_ns;
+                int64_t current = g_scoped_deadline_ns.load(std::memory_order_relaxed);
+                while (current < deadline &&
+                       !g_scoped_deadline_ns.compare_exchange_weak(current, deadline)) {
+                }
+                static std::atomic<uint32_t> logged_base{0};
+                if (logged_base.exchange(base) != base) {
+                    LARECOMP_APP_INFO("[Vinyl] scoped readback {}", range);
+                }
+                return;
+            }
+        }
+    }
+    HoldGlobalReadback(ReadbackClient::kVinyl, hold_ns);
+}
+
+// Clears the scoped range once its window has run out.
+static void TickVinylScopedReadback() {
+    int64_t deadline = g_scoped_deadline_ns.load(std::memory_order_relaxed);
+    if (deadline && VinylNowNs() >= deadline &&
+        g_scoped_deadline_ns.compare_exchange_strong(deadline, 0)) {
+        rex::cvar::SetFlagByName(kScopedReadbackFlag, "");
+    }
+}
+
 // Called from the regen hook: (re)arm the readback window.
 static void ArmVinylReadbackWindow() {
     if (!REXCVAR_GET(vinyl_auto_readback)) return;
     // Generous bridge until the state machine spins up; TickVinylReadbackWindow
     // then keeps it alive for as long as the composite actually runs.
-    HoldGlobalReadback(ReadbackClient::kVinyl, 2'000'000'000LL);  // +2s
+    HoldVinylReadback(2'000'000'000LL);  // +2s
 }
 
 // Called every frame from Patch_DeltaTimePre. Runs regardless of how the
@@ -196,8 +290,9 @@ static void ArmVinylReadbackWindow() {
 // racing (flags stay 0 when no vinyl work is queued).
 void TickVinylReadbackWindow() {
     if (VinylCompositeBusy() && REXCVAR_GET(vinyl_auto_readback)) {
-        HoldGlobalReadback(ReadbackClient::kVinyl, 1'500'000'000LL);  // +1.5s
+        HoldVinylReadback(1'500'000'000LL);  // +1.5s
     }
+    TickVinylScopedReadback();
 }
 
 void Hook_CacheVinylPaint(PPCRegister& r3, PPCRegister& r4, PPCRegister& r5, PPCRegister& r6) {
