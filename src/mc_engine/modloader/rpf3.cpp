@@ -57,6 +57,10 @@ uint32_t RageHash(std::string_view text) {
 bool Rpf3Reader::Open(const std::filesystem::path& path) {
     entries_.clear();
     path_ = path;
+    file_size_ = 0;
+    std::error_code size_error;
+    file_size_ = std::filesystem::file_size(path, size_error);
+    if (size_error || file_size_ < kTocOffset) return false;
 
     FILE* file = nullptr;
 #if defined(_WIN32)
@@ -78,7 +82,8 @@ bool Rpf3Reader::Open(const std::filesystem::path& path) {
 
     const uint32_t toc_size = header[1];
     const uint32_t count = header[2];
-    if (toc_size < static_cast<uint64_t>(count) * 16) {
+    if (toc_size < static_cast<uint64_t>(count) * 16 ||
+        uint64_t(kTocOffset) + toc_size > file_size_) {
         std::fclose(file);
         return false;
     }
@@ -173,7 +178,8 @@ bool Rpf3Reader::ListDirectory(std::string_view path, std::vector<Rpf3Entry>& ou
     return true;
 }
 
-bool Rpf3Reader::ReadFile(const Rpf3Entry& entry, std::vector<uint8_t>& out) const {
+bool Rpf3Reader::ReadRange(uint64_t offset, size_t size, std::vector<uint8_t>& out) const {
+    if (offset > file_size_ || uint64_t(size) > file_size_ - offset) return false;
     FILE* file = nullptr;
 #if defined(_WIN32)
     if (_wfopen_s(&file, path_.wstring().c_str(), L"rb") != 0) file = nullptr;
@@ -183,19 +189,34 @@ bool Rpf3Reader::ReadFile(const Rpf3Entry& entry, std::vector<uint8_t>& out) con
     if (!file) return false;
 
 #if defined(_WIN32)
-    const int seek_ok = _fseeki64(file, static_cast<int64_t>(entry.data_offset()), SEEK_SET);
+    const int seek_ok = _fseeki64(file, static_cast<int64_t>(offset), SEEK_SET);
 #else
-    const int seek_ok = fseeko(file, static_cast<off_t>(entry.data_offset()), SEEK_SET);
+    const int seek_ok = fseeko(file, static_cast<off_t>(offset), SEEK_SET);
 #endif
     if (seek_ok != 0) {
         std::fclose(file);
         return false;
     }
 
-    out.resize(entry.size);
+    out.resize(size);
     const bool ok = out.empty() || std::fread(out.data(), 1, out.size(), file) == out.size();
     std::fclose(file);
+    if (!ok) out.clear();
     return ok;
+}
+
+bool Rpf3Reader::ReadFile(const Rpf3Entry& entry, std::vector<uint8_t>& out) const {
+    return !entry.is_directory() && ReadRange(entry.data_offset(), entry.size, out);
+}
+
+bool Rpf3Reader::ReadStoredFile(size_t index, std::vector<uint8_t>& out) const {
+    const Rpf3Entry* entry = entry_at(index);
+    if (!entry || entry->is_directory()) return false;
+    size_t stored_size = entry->size;
+    if (!entry->is_resource() && (entry->flag & 0x40000000u)) {
+        stored_size = entry->flag & 0x3FFFFFFFu;
+    }
+    return ReadRange(entry->data_offset(), stored_size, out);
 }
 
 void Rpf3Writer::Add(std::string path, std::vector<uint8_t> data, uint32_t flag,

@@ -272,6 +272,16 @@ REXCVAR_DEFINE_INT32(mcla_native_gfx_shadow_bias, 16, "MCLA/NativeGfx",
                      "the resolve into the atlas is bit-exact against the 640x640 target. 0 "
                      "restores the unbiased behaviour.");
 
+REXCVAR_DEFINE_BOOL(mcla_native_gfx_reflection_flip_winding, true, "MCLA/NativeGfx",
+                    "Invert front-face only for 256x256 HDR reflection passes. Their mirror "
+                    "matrix reverses winding; without this the reflection target measured "
+                    "99.1% empty. Keeps ordinary back-face culling enabled.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_BOOL(mcla_native_gfx_reflection_nocull, false, "MCLA/NativeGfx",
+                    "Diagnostic/fix candidate: disable face culling only for 256x256 HDR "
+                    "reflection passes. Their mirror matrix reverses winding; without an "
+                    "explicit compensation the resolved reflection target is 99.1% empty.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 REXCVAR_DEFINE_BOOL(mcla_native_gfx_rectlist_nocull, true, "MCLA/NativeGfx",
                     "Disable face culling for kRectangleList draws. The Xenos rect primitive "
                     "describes an AREA and generates its own triangles; synthesising the fourth "
@@ -2866,8 +2876,31 @@ bool PresentDisplayNow(ID3D12Resource* display, uint32_t fmt, uint32_t w, uint32
     return false;
   }
 
+  uint32_t display_aspect_x = w;
+  uint32_t display_aspect_y = h;
+  // The guest still renders into its fixed 1280x720 surfaces, but the camera
+  // patch uses the configured logical video mode (1720x720 for 3440x1440).
+  // Passing the frontbuffer size as the display aspect made Presenter preserve
+  // 16:9, adding pillarboxes and leaving the ultrawide projection squeezed.
+  // Keep the physical source dimensions while advertising the logical aspect.
+  try {
+    const std::string configured_width = rex::cvar::GetFlagByName("video_mode_width");
+    const std::string configured_height = rex::cvar::GetFlagByName("video_mode_height");
+    if (!configured_width.empty() && !configured_height.empty()) {
+      const uint32_t parsed_width = uint32_t(std::stoul(configured_width));
+      const uint32_t parsed_height = uint32_t(std::stoul(configured_height));
+      if (parsed_width && parsed_height) {
+        display_aspect_x = parsed_width;
+        display_aspect_y = parsed_height;
+      }
+    }
+  } catch (...) {
+    // Malformed optional cvars fall back to the frontbuffer aspect.
+  }
+
   const bool ok = g_presenter->RefreshGuestOutput(
-      w, h, w, h, [&](rex::ui::Presenter::GuestOutputRefreshContext& refresh) -> bool {
+      w, h, display_aspect_x, display_aspect_y,
+      [&](rex::ui::Presenter::GuestOutputRefreshContext& refresh) -> bool {
         auto& ctx =
             static_cast<rex::ui::d3d12::D3D12Presenter::D3D12GuestOutputRefreshContext&>(refresh);
         ID3D12GraphicsCommandList* cl =

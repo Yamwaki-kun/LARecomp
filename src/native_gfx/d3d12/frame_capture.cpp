@@ -1984,6 +1984,71 @@ static void CaptureDrawImpl(const uint8_t* base, uint32_t dev, uint32_t primitiv
   // normals in that count are rmptfx billboard corner offsets that the unpack
   // flattens. DeclarationNeedsPackedNormalUnpack() reads it off the layout.
   const uint32_t vs_spec = DeclarationNeedsPackedNormalUnpack(geom.input_layout) ? 1u : 0u;
+  if (diag) {
+    bool has_lighting_vector = false;
+    uint64_t layout_sig = vs_id ^ uint64_t(vs_spec);
+    for (const InputElement& e : geom.input_layout) {
+      const bool relevant = e.semantic_name &&
+          (!std::strcmp(e.semantic_name, "NORMAL") || !std::strcmp(e.semantic_name, "TANGENT") ||
+           !std::strcmp(e.semantic_name, "BINORMAL"));
+      if (relevant) {
+        has_lighting_vector = true;
+        layout_sig = layout_sig * 1099511628211ull ^
+                     (uint64_t(e.dxgi_format) << 16) ^ e.semantic_index;
+      }
+    }
+    static std::set<uint64_t> seen_normal_specs;
+    if (has_lighting_vector && seen_normal_specs.size() < 256u &&
+        seen_normal_specs.insert(layout_sig).second) {
+      if (FILE* f = std::fopen("native_gfx_diag.txt", "ab")) {
+        std::fprintf(f, "NORMALSPEC vs=%016llX spec=%u target=%ux%u :",
+                     (unsigned long long)vs_id, vs_spec, cfg.width, cfg.height);
+        for (const InputElement& e : geom.input_layout) {
+          if (e.semantic_name &&
+              (!std::strcmp(e.semantic_name, "NORMAL") || !std::strcmp(e.semantic_name, "TANGENT") ||
+               !std::strcmp(e.semantic_name, "BINORMAL"))) {
+            std::fprintf(f, " %s%u=fmt%u@%u", e.semantic_name, e.semantic_index,
+                         e.dxgi_format, e.aligned_byte_offset);
+          }
+        }
+        std::fprintf(f, "\n");
+        std::fclose(f);
+      }
+    }
+    static std::set<uint64_t> seen_skin_specs;
+    bool skinned = false;
+    uint64_t skin_sig = vs_id;
+    for (const InputElement& e : geom.input_layout) {
+      if (e.semantic_name &&
+          (!std::strcmp(e.semantic_name, "BLENDINDICES") ||
+           !std::strcmp(e.semantic_name, "BLENDWEIGHT"))) {
+        skinned = true;
+        skin_sig = skin_sig * 1099511628211ull ^ (uint64_t(e.dxgi_format) << 24) ^
+                   (uint64_t(e.input_slot) << 16) ^ e.aligned_byte_offset;
+      }
+    }
+    if (skinned && seen_skin_specs.size() < 128u && seen_skin_specs.insert(skin_sig).second) {
+      if (FILE* f = std::fopen("native_gfx_diag.txt", "ab")) {
+        std::fprintf(f, "SKINSPEC vs=%016llX target=%ux%u :", (unsigned long long)vs_id,
+                     cfg.width, cfg.height);
+        for (const InputElement& e : geom.input_layout) {
+          if (e.semantic_name &&
+              (!std::strcmp(e.semantic_name, "BLENDINDICES") ||
+               !std::strcmp(e.semantic_name, "BLENDWEIGHT"))) {
+            std::fprintf(f, " %s%u=fmt%u@slot%u+%u", e.semantic_name, e.semantic_index,
+                         e.dxgi_format, e.input_slot, e.aligned_byte_offset);
+          }
+        }
+        for (uint32_t i = 0; i < geom.streams.size(); ++i) {
+          std::fprintf(f, " stream%u(stride=%u base=0x%08X size=%u)", i,
+                       geom.streams[i].stride, geom.streams[i].guest_base,
+                       geom.streams[i].guest_size);
+        }
+        std::fprintf(f, "\n");
+        std::fclose(f);
+      }
+    }
+  }
   const ShaderBytecode vs_code = shaders.Lookup(vs_id, vs_spec, /*is_pixel=*/false);
   const ShaderBytecode ps_code =
       depth_only ? ShaderBytecode{} : shaders.Lookup(ps_id, ps_spec, /*is_pixel=*/true);
@@ -2451,8 +2516,10 @@ static void CaptureDrawImpl(const uint8_t* base, uint32_t dev, uint32_t primitiv
       }
     }
     static uint32_t taken = 0;
-    const bool is_eye = ps_id == 0x5E41952680F1F209ull ||   // __PS, the lit pass
-                        ps_id == 0xD7BA99C168F84D73ull;    // __PS_ShadowBlend
+    const bool is_eye = ps_id == 0x5E41952680F1F209ull ||   // teeth/eyes lit pass
+                        ps_id == 0xD7BA99C168F84D73ull ||   // teeth/eyes ShadowBlend
+                        ps_id == 0x68387D4A0B431769ull ||   // skin blendshape normalmap
+                        ps_id == 0xC2AC7E2624E44B2Bull;     // skin normalmap
     if (is_eye && taken < REXCVAR_GET(mcla_native_gfx_eye_probe)) {
       ++taken;
       auto psreg = [&](uint32_t reg, float* out) {
@@ -5882,6 +5949,40 @@ bool PrepareContinuousDisplay(D3D12Context& context, RenderTargetPool& render_ta
         ReadbackTargetToTga(context, context.device(), tmp, "native_gfx_eyecoll.tga",
                             "eye shadow collector");
       }
+    }
+  }
+  {  // TEMP DIAG: car-paint dual-paraboloid environment maps.
+    static bool done = false;
+    if (!done && !REXCVAR_GET(mcla_native_gfx_dump_ps).empty()) {
+      struct Probe { uint32_t addr, width, height; const char* path; };
+      static constexpr Probe probes[] = {
+          {0x032E2000u, 512, 256, "native_gfx_car_dpfront.bin"},
+          {0x032DE000u, 64, 32, "native_gfx_car_dpspec.bin"},
+      };
+      bool all_found = true;
+      for (const Probe& probe : probes) {
+        D3D12_RESOURCE_STATES st = D3D12_RESOURCE_STATE_COMMON;
+        ID3D12Resource* res = render_targets.FindResolvedTarget(
+            probe.addr, probe.width, probe.height, /*want_depth=*/false, &st);
+        if (!res) {
+          all_found = false;
+          continue;
+        }
+        RenderTarget tmp;
+        tmp.color = res;
+        tmp.color_state = st;
+        tmp.key.width = probe.width;
+        tmp.key.height = probe.height;
+        tmp.key.rt_format = uint32_t(res->GetDesc().Format);
+        tmp.key.sample_count = 1;
+        ReadbackTargetToRaw(context, context.device(), tmp, probe.path);
+        if (FILE* f = std::fopen("native_gfx_diag.txt", "ab")) {
+          std::fprintf(f, "CARREFLDUMP addr=0x%08X %ux%u dxgi=%u file=%s\n", probe.addr,
+                       probe.width, probe.height, uint32_t(res->GetDesc().Format), probe.path);
+          std::fclose(f);
+        }
+      }
+      done = all_found;
     }
   }
   RenderTarget* display = nullptr;

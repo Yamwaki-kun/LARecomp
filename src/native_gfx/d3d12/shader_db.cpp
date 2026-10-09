@@ -113,7 +113,12 @@ bool ShaderDatabase::Load() {
       }
       return Fnv1a64(p, sz) == fnv;
     };
-    if (!check(e.off0, e.size0, e.fnv0) || !check(e.off1, e.size1, e.fnv1) || e.size0 == 0) {
+    const bool vertex_elements_valid =
+        e.velem_count == 0 ||
+        (e.velem_off >= need &&
+         uint64_t(e.velem_off) + uint64_t(e.velem_count) * sizeof(uint32_t) <= uint64_t(size));
+    if (!check(e.off0, e.size0, e.fnv0) || !check(e.off1, e.size1, e.fnv1) || e.size0 == 0 ||
+        !vertex_elements_valid) {
       ++bad;
       continue;
     }

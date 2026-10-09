@@ -18,6 +18,23 @@ endif()
 
 include(generated/rexglue.cmake)
 
+option(LARECOMP_BUILD_SHADER_SCAN "Build the offline RPF shader container scanner" ON)
+if(LARECOMP_BUILD_SHADER_SCAN AND NOT REXGLUE_ENABLE_XEO3_TARGET)
+    add_executable(larecomp_shader_scan
+        src/tools/shader_scan/main.cpp
+        src/mc_engine/modloader/aes256.cpp
+        src/mc_engine/modloader/rpf3.cpp
+        src/mc_engine/modloader/xcompress.cpp
+        src/native_gfx/shader_identity.cpp
+    )
+    target_include_directories(larecomp_shader_scan PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(larecomp_shader_scan PRIVATE rex::runtime rex::mspack)
+    if(WIN32)
+        target_compile_definitions(larecomp_shader_scan PRIVATE
+            NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
+    endif()
+endif()
+
 # Sources
 set(LARECOMP_SOURCES
     src/main.cpp
@@ -256,6 +273,17 @@ else()
                     "${CMAKE_CURRENT_SOURCE_DIR}/assets/gamecontrollerdb.txt"
                     "$<TARGET_FILE_DIR:larecomp>/gamecontrollerdb.txt"
             COMMENT "Copying gamecontrollerdb.txt next to larecomp.exe")
+    endif()
+
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/mcla_shaders.pack")
+        add_custom_target(larecomp_shader_pack_stage ALL
+            COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:larecomp>/assets"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${CMAKE_CURRENT_SOURCE_DIR}/assets/mcla_shaders.pack"
+                    "$<TARGET_FILE_DIR:larecomp>/assets/mcla_shaders.pack"
+            DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/assets/mcla_shaders.pack"
+            COMMENT "Copying generated MCLA shader pack next to larecomp.exe")
+        add_dependencies(larecomp larecomp_shader_pack_stage)
     endif()
 
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/D3D12")

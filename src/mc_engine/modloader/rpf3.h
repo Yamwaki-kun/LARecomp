@@ -24,6 +24,7 @@
 // remaining bits encode the virtual/physical segment sizes.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -92,10 +93,24 @@ class Rpf3Reader {
     // named by a hash nobody has cracked, and they still have to travel.
     bool ListDirectory(std::string_view path, std::vector<Rpf3Entry>& out) const;
 
+    // Read-only TOC enumeration for offline inspection tools. Entries remain
+    // owned by this reader and are invalidated by the next Open call.
+    size_t entry_count() const { return entries_.size(); }
+    const Rpf3Entry* entry_at(size_t index) const {
+        return index < entries_.size() ? &entries_[index] : nullptr;
+    }
+
+    // Reads the exact stored payload. For deflated plain files, entry.size is
+    // the expanded length while flag's low 30 bits are the stored length.
+    bool ReadStoredFile(size_t index, std::vector<uint8_t>& out) const;
+
     const std::filesystem::path& path() const { return path_; }
 
  private:
+    bool ReadRange(uint64_t offset, size_t size, std::vector<uint8_t>& out) const;
+
     std::filesystem::path path_;
+    uint64_t file_size_ = 0;
     std::vector<Rpf3Entry> entries_;
 };
 

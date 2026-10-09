@@ -17,6 +17,8 @@
 #include "shader_db.h"
 
 REXCVAR_DECLARE(int32_t, mcla_native_gfx_shadow_bias);
+REXCVAR_DECLARE(bool, mcla_native_gfx_reflection_flip_winding);
+REXCVAR_DECLARE(bool, mcla_native_gfx_reflection_nocull);
 REXCVAR_DECLARE(bool, mcla_native_gfx_rectlist_nocull);
 REXCVAR_DECLARE(bool, mcla_native_gfx_pipeline_library);
 
@@ -307,6 +309,7 @@ void PipelineCache::MakeKeyInto(PsoKey& out, const GeometrySnapshot& geometry,
   out.rt_format = ColorRenderTargetFormatToDxgi(render_state.color_format);
   out.ds_format = DepthRenderTargetFormatToDxgi(render_state.depth_format);
   out.sample_count = SampleCountFromMsaa(render_state.msaa_samples);
+  const HostViewport host_viewport = ComputeHostViewport(render_state);
   out.blend_control0 = render_state.blend_control0;
   out.blend_control1 = render_state.blend_control1;
   out.color_control = render_state.color_control;
@@ -316,10 +319,20 @@ void PipelineCache::MakeKeyInto(PsoKey& out, const GeometrySnapshot& geometry,
   out.stencil_mask = (render_state.stencil_read_mask & 0xFFu) |
                      ((render_state.stencil_write_mask & 0xFFu) << 8);
   out.pa_su_sc_mode_cntl = render_state.pa_su_sc_mode_cntl;
+  const bool reflection_pass =
+      uint32_t(host_viewport.width + 0.5f) == 256u &&
+      uint32_t(host_viewport.height + 0.5f) == 256u &&
+      out.rt_format == DXGI_FORMAT_R16G16B16A16_FLOAT;
+  if (reflection_pass && REXCVAR_GET(mcla_native_gfx_reflection_flip_winding)) {
+    out.pa_su_sc_mode_cntl ^= 0x4u;
+  }
+  if (reflection_pass && REXCVAR_GET(mcla_native_gfx_reflection_nocull)) {
+    out.pa_su_sc_mode_cntl &= ~0x3u;
+  }
   if (geometry.primitive_type == 8u && REXCVAR_GET(mcla_native_gfx_rectlist_nocull)) {
     out.pa_su_sc_mode_cntl &= ~0x3u;  // clear cull_front | cull_back
   }
-  out.y_flipped = ComputeHostViewport(render_state).y_flipped ? 1u : 0u;
+  out.y_flipped = host_viewport.y_flipped ? 1u : 0u;
 
   {
     float poly_offset_scale = 0.0f, poly_offset = 0.0f;
